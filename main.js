@@ -217,6 +217,13 @@ let latestGraphSeries = null;
 let latestFacetInfo = [];
 let designFacets = [];
 let designApplyTimer = null;
+let pendingDesignApplyGeometryChanged = false;
+let designHistoryStack = [];
+let designHistoryIndex = -1;
+let designHistoryInputBefore = null;
+let designHistoryRestoreInProgress = false;
+let designFacetReorderSuppressClickUntil = 0;
+const DESIGN_HISTORY_LIMIT = 120;
 let modelHasTableFacet = false;
 const GEM_LIBRARY_ORIGIN = 'https://bogdanthegeek.github.io';
 const GEM_LIBRARY_OPEN_MODEL_EVENT = 'gemlibrary:open-model';
@@ -1301,6 +1308,92 @@ async function setupApp() {
       setDesignStatus(`${designFacets.length} design facets (${uniqueNames} names)`);
    }
 
+   function snapshotDesignFacets() {
+      return designFacets.map((facet, idx) => normalizeDesignFacet({ ...facet }, idx));
+   }
+
+   function cloneDesignFacetSnapshot(snapshot) {
+      return (snapshot || []).map((facet, idx) => normalizeDesignFacet({ ...facet }, idx));
+   }
+
+   function sameDesignFacetSnapshot(a, b) {
+      return JSON.stringify(a || []) === JSON.stringify(b || []);
+   }
+
+   function resetDesignHistory() {
+      const snapshot = snapshotDesignFacets();
+      designHistoryStack = [snapshot];
+      designHistoryIndex = 0;
+      designHistoryInputBefore = null;
+   }
+
+   function commitDesignHistory(beforeSnapshot) {
+      if (designHistoryRestoreInProgress || !beforeSnapshot) return false;
+      const before = cloneDesignFacetSnapshot(beforeSnapshot);
+      const after = snapshotDesignFacets();
+      if (sameDesignFacetSnapshot(before, after)) return false;
+
+      if (designHistoryIndex < designHistoryStack.length - 1) {
+         designHistoryStack = designHistoryStack.slice(0, designHistoryIndex + 1);
+      }
+      designHistoryStack.push(after);
+      if (designHistoryStack.length > DESIGN_HISTORY_LIMIT) {
+         const overflow = designHistoryStack.length - DESIGN_HISTORY_LIMIT;
+         designHistoryStack.splice(0, overflow);
+      }
+      designHistoryIndex = designHistoryStack.length - 1;
+      return true;
+   }
+
+   function queueDesignInputHistory() {
+      if (designHistoryRestoreInProgress) return;
+      if (!designHistoryInputBefore) {
+         designHistoryInputBefore = snapshotDesignFacets();
+      }
+   }
+
+   function flushDesignInputHistory() {
+      if (!designHistoryInputBefore || designHistoryRestoreInProgress) return;
+      const before = designHistoryInputBefore;
+      designHistoryInputBefore = null;
+      commitDesignHistory(before);
+   }
+
+   function restoreDesignHistorySnapshot(snapshot) {
+      designHistoryRestoreInProgress = true;
+      designHistoryInputBefore = null;
+      designFacets = cloneDesignFacetSnapshot(snapshot);
+      renderDesignFacetList();
+      scheduleDesignApply(true);
+      designHistoryRestoreInProgress = false;
+   }
+
+   function flushPendingDesignApplyNow() {
+      if (!designApplyTimer) return;
+      clearTimeout(designApplyTimer);
+      designApplyTimer = null;
+      const geometryChanged = pendingDesignApplyGeometryChanged;
+      pendingDesignApplyGeometryChanged = false;
+      applyDesignStone(geometryChanged);
+      flushDesignInputHistory();
+   }
+
+   function undoDesignHistory() {
+      flushPendingDesignApplyNow();
+      if (designHistoryIndex <= 0) return false;
+      designHistoryIndex -= 1;
+      restoreDesignHistorySnapshot(designHistoryStack[designHistoryIndex]);
+      return true;
+   }
+
+   function redoDesignHistory() {
+      flushPendingDesignApplyNow();
+      if (designHistoryIndex >= designHistoryStack.length - 1) return false;
+      designHistoryIndex += 1;
+      restoreDesignHistorySnapshot(designHistoryStack[designHistoryIndex]);
+      return true;
+   }
+
    function renderDesignFacetList() {
       if (!designFacets.length) {
          designFacetListEl.innerHTML = '<div class="designFacetEmpty">No facets in design. Add from Create tab.</div>';
@@ -1587,9 +1680,13 @@ async function setupApp() {
 
    function scheduleDesignApply(geometryChanged = true) {
       if (designApplyTimer) clearTimeout(designApplyTimer);
+      pendingDesignApplyGeometryChanged = pendingDesignApplyGeometryChanged || Boolean(geometryChanged);
       designApplyTimer = setTimeout(() => {
          designApplyTimer = null;
-         applyDesignStone(geometryChanged);
+         const nextGeometryChanged = pendingDesignApplyGeometryChanged;
+         pendingDesignApplyGeometryChanged = false;
+         applyDesignStone(nextGeometryChanged);
+         flushDesignInputHistory();
       }, 20);
    }
 
@@ -1736,11 +1833,13 @@ async function setupApp() {
 
       designFacets = grouped.map((facet, idx) => normalizeDesignFacet(facet, idx));
       renderDesignFacetList();
+      resetDesignHistory();
    }
 
    function installNumberDragScrub(rootEl) {
       if (!rootEl) return;
       let dragState = null;
+      const DRAG_DEADZONE_PX = 3;
 
       const countStepDecimals = (step) => {
          if (!Number.isFinite(step)) return 0;
@@ -1759,6 +1858,7 @@ async function setupApp() {
       rootEl.addEventListener('pointerdown', (e) => {
          const inputEl = e.target.closest('input[type="number"]');
          if (!inputEl || !rootEl.contains(inputEl) || inputEl.disabled || inputEl.readOnly) return;
+         if (e.button !== 0) return;
 
          const startValue = parseFloat(inputEl.value);
          const step = parseFloat(inputEl.step);
@@ -1770,6 +1870,7 @@ async function setupApp() {
             inputEl,
             pointerId: e.pointerId,
             startX: e.clientX,
+            startY: e.clientY,
             startValue: Number.isFinite(startValue) ? startValue : 0,
             step: parsedStep,
             decimals: countStepDecimals(parsedStep),
@@ -1777,13 +1878,25 @@ async function setupApp() {
             max: Number.isFinite(max) ? max : null,
             moved: false,
             vel: 0,
+            axisLocked: false,
          };
-         inputEl.setPointerCapture(e.pointerId);
       });
 
       rootEl.addEventListener('pointermove', (e) => {
          if (!dragState || e.pointerId !== dragState.pointerId) return;
+
          const dx = e.clientX - dragState.startX;
+         const dy = e.clientY - dragState.startY;
+         if (!dragState.axisLocked) {
+            if (Math.abs(dx) < DRAG_DEADZONE_PX && Math.abs(dy) < DRAG_DEADZONE_PX) return;
+            if (Math.abs(dy) > Math.abs(dx)) {
+               dragState = null;
+               return;
+            }
+            dragState.axisLocked = true;
+            dragState.inputEl.setPointerCapture(e.pointerId);
+         }
+
          if (!dragState.moved && Math.abs(dx) < 2) return;
          dragState.moved = true;
          e.preventDefault();
@@ -1809,6 +1922,139 @@ async function setupApp() {
       rootEl.addEventListener('pointercancel', endDrag);
       rootEl.addEventListener('lostpointercapture', (e) => {
          if (dragState && e.pointerId === dragState.pointerId) dragState = null;
+      });
+   }
+
+   function installDesignFacetRowReorder(rootEl) {
+      if (!rootEl) return;
+
+      const DRAG_DEADZONE_PX = 3;
+      let dragState = null;
+
+      const clearDragClasses = () => {
+         rootEl.classList.remove('designFacetReorderActive');
+         rootEl.querySelectorAll('tr.designFacetDragging').forEach((rowEl) => rowEl.classList.remove('designFacetDragging'));
+         rootEl.querySelectorAll('tr.designFacetDropBefore').forEach((rowEl) => rowEl.classList.remove('designFacetDropBefore'));
+         rootEl.querySelectorAll('tr.designFacetDropAfter').forEach((rowEl) => rowEl.classList.remove('designFacetDropAfter'));
+      };
+
+      const getRows = () => [...rootEl.querySelectorAll('tbody tr[data-id]')];
+
+      const findDropIndex = (clientY, rows) => {
+         for (let idx = 0; idx < rows.length; idx += 1) {
+            const rect = rows[idx].getBoundingClientRect();
+            const midpoint = rect.top + (rect.height * 0.5);
+            if (clientY < midpoint) return idx;
+         }
+         return rows.length;
+      };
+
+      const updateDropVisuals = (sourceId, dropIndex) => {
+         clearDragClasses();
+         const rows = getRows();
+         if (!rows.length) return;
+
+         rootEl.classList.add('designFacetReorderActive');
+         const dragRow = rows.find((rowEl) => rowEl.dataset.id === sourceId);
+         if (dragRow) dragRow.classList.add('designFacetDragging');
+
+         const fromIdx = designFacets.findIndex((facet) => facet.id === sourceId);
+         if (fromIdx < 0) return;
+         if (dropIndex === fromIdx || dropIndex === fromIdx + 1) return;
+
+         if (dropIndex >= rows.length) {
+            rows[rows.length - 1]?.classList.add('designFacetDropAfter');
+            return;
+         }
+         rows[dropIndex]?.classList.add('designFacetDropBefore');
+      };
+
+      const finishReorder = (state) => {
+         const fromIdx = designFacets.findIndex((facet) => facet.id === state.sourceId);
+         if (fromIdx < 0) return;
+         const dropIndex = Math.max(0, Math.min(state.dropIndex, designFacets.length));
+         if (dropIndex === fromIdx || dropIndex === fromIdx + 1) return;
+
+         const next = designFacets.slice();
+         const [moved] = next.splice(fromIdx, 1);
+         if (!moved) return;
+         const targetIdx = dropIndex > fromIdx ? dropIndex - 1 : dropIndex;
+         next.splice(targetIdx, 0, moved);
+
+         designFacets = next.map((facet, idx) => normalizeDesignFacet(facet, idx));
+         renderDesignFacetList();
+         scheduleDesignApply(false);
+         commitDesignHistory(state.beforeSnapshot);
+      };
+
+      rootEl.addEventListener('pointerdown', (e) => {
+         if (e.button !== 0) return;
+         if (Date.now() < designFacetReorderSuppressClickUntil) return;
+         const rowEl = e.target.closest('tr[data-id]');
+         if (!rowEl || !rootEl.contains(rowEl)) return;
+         if (e.target.closest('[data-remove]')) return;
+
+         dragState = {
+            pointerId: e.pointerId,
+            startX: e.clientX,
+            startY: e.clientY,
+            sourceId: rowEl.dataset.id,
+            mode: null,
+            dropIndex: designFacets.findIndex((facet) => facet.id === rowEl.dataset.id),
+            beforeSnapshot: null,
+         };
+      });
+
+      rootEl.addEventListener('pointermove', (e) => {
+         if (!dragState || e.pointerId !== dragState.pointerId) return;
+
+         const dx = e.clientX - dragState.startX;
+         const dy = e.clientY - dragState.startY;
+         if (dragState.mode !== 'vertical') {
+            if (Math.abs(dx) < DRAG_DEADZONE_PX && Math.abs(dy) < DRAG_DEADZONE_PX) return;
+            if (Math.abs(dy) <= Math.abs(dx)) {
+               dragState = null;
+               clearDragClasses();
+               return;
+            }
+
+            flushPendingDesignApplyNow();
+            dragState.beforeSnapshot = snapshotDesignFacets();
+            dragState.mode = 'vertical';
+            rootEl.setPointerCapture(e.pointerId);
+         }
+
+         e.preventDefault();
+         const rows = getRows();
+         if (!rows.length) return;
+         dragState.dropIndex = findDropIndex(e.clientY, rows);
+         updateDropVisuals(dragState.sourceId, dragState.dropIndex);
+      });
+
+      const finishDrag = (e) => {
+         if (!dragState || e.pointerId !== dragState.pointerId) return;
+         const state = dragState;
+         dragState = null;
+
+         if (rootEl.hasPointerCapture(state.pointerId)) {
+            rootEl.releasePointerCapture(state.pointerId);
+         }
+
+         if (state.mode === 'vertical' && state.beforeSnapshot) {
+            finishReorder(state);
+            designFacetReorderSuppressClickUntil = Date.now() + 220;
+         }
+
+         clearDragClasses();
+      };
+
+      rootEl.addEventListener('pointerup', finishDrag);
+      rootEl.addEventListener('pointercancel', finishDrag);
+      rootEl.addEventListener('lostpointercapture', (e) => {
+         if (dragState && e.pointerId === dragState.pointerId) {
+            dragState = null;
+            clearDragClasses();
+         }
       });
    }
 
@@ -1951,10 +2197,12 @@ async function setupApp() {
    }
 
    designAddFacetBtn.addEventListener('click', () => {
+      const historyBefore = snapshotDesignFacets();
       const nextFacet = readCreateFacetFromInputs();
       designFacets.push(nextFacet);
       renderDesignFacetList();
       scheduleDesignApply();
+      commitDesignHistory(historyBefore);
       const lastName = designNameEl.value;
       let newName = lastName;
 
@@ -2093,12 +2341,15 @@ async function setupApp() {
       designHeaderEl.value = '';
       designFooterEl.value = '';
       renderDesignFacetList();
+      resetDesignHistory();
       scheduleDesignApply();
    });
 
    renderDesignFacetList();
+   resetDesignHistory();
    installNumberDragScrub(designBodyEl);
    installNumberDragScrub(designFacetListEl);
+   installDesignFacetRowReorder(designFacetListEl);
 
    designFacetListEl.addEventListener('input', (e) => {
       const itemEl = e.target.closest('[data-id]');
@@ -2107,6 +2358,7 @@ async function setupApp() {
       if (facetIdx < 0) return;
       const field = e.target.dataset.field;
       if (!field) return;
+      queueDesignInputHistory();
       const nextFacet = { ...designFacets[facetIdx] };
       if (field === 'mirror') nextFacet[field] = Boolean(e.target.checked);
       else if (field === 'name' || field === 'instructions') nextFacet[field] = e.target.value;
@@ -2125,14 +2377,20 @@ async function setupApp() {
    });
 
    designFacetListEl.addEventListener('click', (e) => {
+      if (Date.now() < designFacetReorderSuppressClickUntil) {
+         e.preventDefault();
+         return;
+      }
       const removeBtn = e.target.closest('[data-remove]');
       const itemEl = e.target.closest('[data-id]');
       if (!itemEl) return;
 
       if (removeBtn) {
+         const historyBefore = snapshotDesignFacets();
          designFacets = designFacets.filter((facet) => facet.id !== itemEl.dataset.id);
          renderDesignFacetList();
          scheduleDesignApply();
+         commitDesignHistory(historyBefore);
          return;
       }
 
@@ -2963,6 +3221,7 @@ async function setupApp() {
       if (!best) return false;
 
       const keepNegativeFlat = Math.abs(facet.angleDeg) <= 1e-8 && Number(facet.distance) < 0;
+      const historyBefore = snapshotDesignFacets();
       designFacets[facetIdx] = normalizeDesignFacet(
          {
             ...facet,
@@ -2974,6 +3233,7 @@ async function setupApp() {
 
       renderDesignFacetList();
       scheduleDesignApply();
+   commitDesignHistory(historyBefore);
       setDesignStatus(`Set ${facet.name || `F${facetIdx + 1}`} distance to meet selected vertex on index ${best.idx}`);
       return true;
    }
@@ -4477,6 +4737,23 @@ async function setupApp() {
    });
 
    window.addEventListener('keydown', (e) => {
+      const key = String(e.key || '').toLowerCase();
+      const isMac = /mac/i.test(navigator.platform);
+      const hasUndoModifier = isMac ? e.metaKey : e.ctrlKey;
+
+      if (hasUndoModifier && key === 'z') {
+         e.preventDefault();
+         const changed = e.shiftKey ? redoDesignHistory() : undoDesignHistory();
+         if (!changed) setDesignStatus(e.shiftKey ? 'Nothing to redo.' : 'Nothing to undo.');
+         return;
+      }
+
+      if (!isMac && e.ctrlKey && key === 'y') {
+         e.preventDefault();
+         if (!redoDesignHistory()) setDesignStatus('Nothing to redo.');
+         return;
+      }
+
       if (e.key === 'Escape') {
          clearDesignSelection(true);
          requestRender();

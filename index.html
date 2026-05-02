@@ -378,6 +378,18 @@
         .designFacetTable tbody tr:last-child td {
             border-bottom: none;
         }
+        #designFacetList.designFacetReorderActive {
+            user-select: none;
+        }
+        .designFacetTable tbody tr.designFacetDragging td {
+            background: rgba(126, 184, 247, 0.10);
+        }
+        .designFacetTable tbody tr.designFacetDropBefore td {
+            border-top: 2px solid #7eb8f7;
+        }
+        .designFacetTable tbody tr.designFacetDropAfter td {
+            border-bottom: 2px solid #7eb8f7;
+        }
         .designFacetTable input[type=text],
         .designFacetTable input[type=number] {
             width: 100%;
