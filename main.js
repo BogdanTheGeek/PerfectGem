@@ -4161,11 +4161,24 @@ async function setupApp() {
       const bx = Math.min(Math.max(8, selectionOverlayCssWidth - boxW - 8), x);
       const by = Math.min(Math.max(8, selectionOverlayCssHeight - boxH - 8), y);
 
+      const cornerRadius = 8;
+      const roundedRectPath = new Path2D();
+      roundedRectPath.moveTo(bx + cornerRadius, by);
+      roundedRectPath.lineTo(bx + boxW - cornerRadius, by);
+      roundedRectPath.arcTo(bx + boxW, by, bx + boxW, by + cornerRadius, cornerRadius);
+      roundedRectPath.lineTo(bx + boxW, by + boxH - cornerRadius);
+      roundedRectPath.arcTo(bx + boxW, by + boxH, bx + boxW - cornerRadius, by + boxH, cornerRadius);
+      roundedRectPath.lineTo(bx + cornerRadius, by + boxH);
+      roundedRectPath.arcTo(bx, by + boxH, bx, by + boxH - cornerRadius, cornerRadius);
+      roundedRectPath.lineTo(bx, by + cornerRadius);
+      roundedRectPath.arcTo(bx, by, bx + cornerRadius, by, cornerRadius);
+      roundedRectPath.closePath();
+
       selectionOverlayCtx.fillStyle = 'rgba(0,0,0,0.74)';
-      selectionOverlayCtx.fillRect(bx, by, boxW, boxH);
+      selectionOverlayCtx.fill(roundedRectPath);
       selectionOverlayCtx.strokeStyle = 'rgba(40,255,120,0.75)';
       selectionOverlayCtx.lineWidth = 1;
-      selectionOverlayCtx.strokeRect(bx + 0.5, by + 0.5, boxW - 1, boxH - 1);
+      selectionOverlayCtx.stroke(roundedRectPath);
       selectionOverlayCtx.fillStyle = 'rgba(210,255,225,0.95)';
       selectionOverlayCtx.textBaseline = 'top';
       for (let i = 0; i < lines.length; i++) {
