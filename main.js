@@ -15,6 +15,7 @@ import {
    groupExternalFacetsForDesign,
    normalizeDesignFacet,
    stretchStoneByVertices,
+   computeNormalFromPolar,
    generateFacesFromFacetList,
    computeFacetNotesSummary
 } from './loaders.js';
@@ -185,6 +186,8 @@ const designDistanceEl = document.getElementById('designDistance');
 const designNameEl = document.getElementById('designName');
 const designInstructionsEl = document.getElementById('designInstructions');
 const designAddFacetBtn = document.getElementById('designAddFacetBtn');
+const designRecenterBtn = document.getElementById('designRecenterBtn');
+const designUnitSphereBtn = document.getElementById('designUnitSphereBtn');
 const designSaveGemBtn = document.getElementById('designSaveGemBtn');
 const designClearBtn = document.getElementById('designClearBtn');
 const graphToggleEl = document.getElementById('lightReturnToggle');
@@ -2226,6 +2229,105 @@ async function setupApp() {
          }
       }
       designNameEl.value = newName;
+   });
+
+   designRecenterBtn?.addEventListener('click', () => {
+      if (!designFacets.length) {
+         setDesignStatus('Add facets before recenter.');
+         return;
+      }
+
+      const gear = parseInt(designGearEl.value, 10);
+      if (!Number.isFinite(gear) || gear <= 0) {
+         setDesignStatus('Invalid gear for recenter.');
+         return;
+      }
+
+      const historyBefore = snapshotDesignFacets();
+      try {
+         const designDefinition = {
+            gear: gear,
+            refractiveIndex: ui.ri,
+            facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
+            metadata: getMetadataFromDesign(),
+         };
+         const stone = buildStoneFromFacetDesign(designDefinition);
+         if (!(stone?.vertexData instanceof Float32Array) || stone.vertexData.length < 3) {
+            setDesignStatus('Recenter failed: no geometry.');
+            return;
+         }
+
+         let minZ = Infinity;
+         let maxZ = -Infinity;
+         for (let i = 2; i < stone.vertexData.length; i += 7) {
+            const z = stone.vertexData[i];
+            if (!Number.isFinite(z)) continue;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+         }
+
+         if (!Number.isFinite(minZ) || !Number.isFinite(maxZ)) {
+            setDesignStatus('Recenter failed: invalid vertex data.');
+            return;
+         }
+
+         const deltaZ = -((minZ + maxZ) * 0.5);
+         if (Math.abs(deltaZ) <= 1e-8) {
+            setDesignStatus('Stone already centered.');
+            return;
+         }
+
+         designFacets = designFacets.map((facet, idx) => {
+            const normalized = normalizeDesignFacet(facet, idx);
+            const normal = computeNormalFromPolar(normalized.angleDeg, normalized.startIndex, gear, 0);
+            let nz = Number.isFinite(normal?.[2]) ? normal[2] : 0;
+            if (Math.abs(normalized.angleDeg) <= 1e-8 && Number.isFinite(Number(normalized.distance)) && Number(normalized.distance) < 0) {
+               nz = -1;
+            }
+            const nextDistance = (Number(normalized.distance) || 0) + (nz * deltaZ);
+            return normalizeDesignFacet({ ...normalized, distance: nextDistance }, idx);
+         });
+
+         renderDesignFacetList();
+         scheduleDesignApply(true);
+         commitDesignHistory(historyBefore);
+         setDesignStatus(`Recentered stone by z=${deltaZ.toFixed(4)}`);
+      } catch (err) {
+         console.error(err);
+         setDesignStatus(`Recenter failed: ${err?.message || 'error'}`);
+      }
+   });
+
+   designUnitSphereBtn?.addEventListener('click', () => {
+      if (!designFacets.length) {
+         setDesignStatus('Add facets before unit-sphere rescale.');
+         return;
+      }
+
+      const gear = parseInt(designGearEl.value, 10);
+      if (!Number.isFinite(gear) || gear <= 0) {
+         setDesignStatus('Invalid gear for unit-sphere rescale.');
+         return;
+      }
+
+      const historyBefore = snapshotDesignFacets();
+      try {
+         const designDefinition = {
+            gear: gear,
+            refractiveIndex: ui.ri,
+            facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
+            metadata: getMetadataFromDesign(),
+         };
+         const stone = buildStoneFromFacetDesign(designDefinition);
+         normalizeStoneToUnitSphere(stone);
+         applyStoneData(currentModelFilename, stone, { syncDesignFromStone: false, isDesign: true });
+         setDesignFromStoneFacets(stone.facets || [], stone.sourceGear, { resetHistory: false });
+         commitDesignHistory(historyBefore);
+         setDesignStatus('Rescaled design to unit sphere.');
+      } catch (err) {
+         console.error(err);
+         setDesignStatus(`Unit-sphere rescale failed: ${err?.message || 'error'}`);
+      }
    });
 
    designSaveGemBtn?.addEventListener('click', async () => {
