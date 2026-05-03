@@ -12,6 +12,7 @@ import {
    hasUniqueTableFacet,
    buildFacetInfo,
    groupExternalFacetsForDesign,
+   buildInstructionAngleCutSequence,
    normalizeDesignFacet,
    stretchStoneByVertices,
    computeNormalFromPolar,
@@ -609,18 +610,26 @@ function buildUI(ui, cbs) {
    });
 
 
-   const gemTopTabsEl = panel.querySelector('#gemTopTabs');
-   const gemControlsTabPanelEl = panel.querySelector('#gemControlsTabPanel');
-   const gemDesignTabPanelEl = panel.querySelector('#gemDesignTabPanel');
+   const gemTopTabsEl = document.getElementById('gemTopTabs');
+   const gemControlsTabPanelEl = document.getElementById('gemControlsTabPanel');
+   const gemDesignTabPanelEl = document.getElementById('gemDesignTabPanel');
+   const gemCutsTabPanelEl = document.getElementById('gemCutsTabPanel');
+   const cutsReadoutEl = document.getElementById('cutsReadout');
+   const cutsAnglePrevBtn = document.getElementById('cutsAnglePrevBtn');
+   const cutsAngleNextBtn = document.getElementById('cutsAngleNextBtn');
+   const cutsIndexPrevBtn = document.getElementById('cutsIndexPrevBtn');
+   const cutsIndexNextBtn = document.getElementById('cutsIndexNextBtn');
    const setGemTopTab = (tabName) => {
       const isDesign = tabName === 'design';
-      gemControlsTabPanelEl?.classList.toggle('active', !isDesign);
+      const isCuts = tabName === 'cuts';
+      gemControlsTabPanelEl?.classList.toggle('active', !isDesign && !isCuts);
       gemDesignTabPanelEl?.classList.toggle('active', isDesign);
+      gemCutsTabPanelEl?.classList.toggle('active', isCuts);
       gemTopTabsEl?.querySelectorAll('.mode').forEach((btn) => {
          btn.classList.toggle('active', btn.dataset.gemTab === tabName);
       });
 
-      const mode = isDesign ? 4 : 3; // Flat for design, default for controls
+      const mode = (isDesign || isCuts) ? 4 : 3; // Flat for design/cuts, default for controls
       if (mode !== ui.lightMode) {
          setLightMode(mode);
       }
@@ -633,6 +642,10 @@ function buildUI(ui, cbs) {
       if (!button) return;
       setGemTopTab(button.dataset.gemTab);
    });
+   cutsAnglePrevBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('angle', -1));
+   cutsAngleNextBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('angle', 1));
+   cutsIndexPrevBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('index', -1));
+   cutsIndexNextBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('index', 1));
    setGemTopTab('controls');
 
    // Mobile toggle
@@ -1006,6 +1019,10 @@ ${stoneRenderImg}
       setRenderScaleMax(maxScale) {
          ui.renderScaleMax = Math.max(0.5, maxScale || 1);
          applyRenderScaleUi();
+      },
+      setCutsReadout(text) {
+         if (!cutsReadoutEl) return;
+         cutsReadoutEl.textContent = String(text || 'No cut sequence loaded.');
       },
    };
 }
@@ -2647,6 +2664,14 @@ async function setupApp() {
    const invModelMat = mat4.create();
 
    let currentGemTab = 'controls';
+   let cutsSourceStone = null;
+   let cutsSequence = [];
+   let cutsAngleIndex = 0;
+   let cutsIndexIndex = 0;
+   let cutsActionChain = Promise.resolve();
+   let cutsRestoreStone = null;
+   let cutsRestoreFilename = '';
+   let cutsRestoreIsDesign = false;
    let designPickDirty = true;
    let designHaloCache = null;
    let designHover = null;
@@ -2713,6 +2738,199 @@ async function setupApp() {
          if (gear % d === 0) return d;
       }
       return 5;
+   }
+
+   function updateCutsReadout() {
+      if (!uiControls?.setCutsReadout) return;
+      if (!cutsSequence.length) {
+         uiControls.setCutsReadout('No cut sequence loaded.');
+         return;
+      }
+
+      const group = cutsSequence[cutsAngleIndex];
+      const step = group?.steps?.[cutsIndexIndex];
+      if (!group || !step) {
+         uiControls.setCutsReadout('No cut sequence loaded.');
+         return;
+      }
+
+      const indexLabel = String(step.index).padStart(2, '0');
+      const cutName = step.name || '?';
+      const cutInstructions = step.instructions ? `\n${step.instructions}` : '';
+      const text = [
+         `Angle: ${group.angleLabel} (${cutsAngleIndex + 1}/${cutsSequence.length})`,
+         `Index: ${indexLabel} (${cutsIndexIndex + 1}/${group.steps.length})`,
+         `Cut: ${cutName}${cutInstructions}`,
+      ].join('\n');
+      uiControls.setCutsReadout(text);
+   }
+
+   function setCutsSequenceFromStone(stone) {
+      const facets = Array.isArray(stone?.facets) ? stone.facets : [];
+      const sourceGear = parseInt(stone?.sourceGear, 10);
+      const gear = Number.isFinite(sourceGear) && sourceGear > 0
+         ? sourceGear
+         : Math.max(1, parseInt(designGearEl.value, 10) || 96);
+      const grouped = buildInstructionAngleCutSequence(facets, gear);
+
+      cutsSourceStone = stone || null;
+      cutsSequence = grouped.map((group, groupIdx) => {
+         const steps = [];
+         group.cuts.forEach((cut, cutIdx) => {
+            const indexes = Array.isArray(cut.indexes) && cut.indexes.length
+               ? cut.indexes
+               : [Math.max(1, parseInt(cut.startIndex, 10) || 1)];
+
+            indexes.forEach((indexValue, indexIdx) => {
+               const index = Math.max(1, parseInt(indexValue, 10) || 1);
+               const facet = normalizeDesignFacet({
+                  id: `cut-${groupIdx}-${cutIdx}-${indexIdx}`,
+                  name: cut.name,
+                  instructions: cut.instructions,
+                  symmetry: 1,
+                  mirror: false,
+                  angleDeg: cut.angleDeg,
+                  startIndex: index,
+                  distance: cut.distance,
+                  indexes: [index],
+               }, steps.length);
+               steps.push({
+                  name: cut.name,
+                  instructions: cut.instructions,
+                  index,
+                  facet,
+               });
+            });
+         });
+
+         return {
+            angleDeg: group.angleDeg,
+            angleLabel: group.angleLabel,
+            steps,
+         };
+      }).filter((group) => group.steps.length > 0);
+
+      cutsAngleIndex = 0;
+      cutsIndexIndex = 0;
+      updateCutsReadout();
+   }
+
+   function moveCutsAngle(direction) {
+      if (!cutsSequence.length) return;
+      const total = cutsSequence.length;
+      const nextAngle = cutsAngleIndex + direction;
+      if (nextAngle < 0 || nextAngle >= total) return;
+      cutsAngleIndex = nextAngle;
+      const stepCount = cutsSequence[cutsAngleIndex]?.steps?.length || 1;
+      cutsIndexIndex = direction > 0 ? Math.max(0, stepCount - 1) : 0;
+   }
+
+   function moveCutsIndex(direction) {
+      if (!cutsSequence.length) return;
+      const group = cutsSequence[cutsAngleIndex];
+      if (!group || !group.steps.length) return;
+
+      const next = cutsIndexIndex + direction;
+      if (next >= 0 && next < group.steps.length) {
+         cutsIndexIndex = next;
+         return;
+      }
+
+      if (direction > 0) {
+         const prevAngleIndex = cutsAngleIndex;
+         moveCutsAngle(1);
+         if (cutsAngleIndex !== prevAngleIndex) {
+            cutsIndexIndex = 0;
+         }
+      } else {
+         const prevAngleIndex = cutsAngleIndex;
+         moveCutsAngle(-1);
+         if (cutsAngleIndex !== prevAngleIndex) {
+            const prevGroup = cutsSequence[cutsAngleIndex];
+            cutsIndexIndex = Math.max(0, (prevGroup?.steps?.length || 1) - 1);
+         }
+      }
+   }
+
+   function buildCutsFacetPreviewSubset() {
+      if (!cutsSequence.length) return [];
+      const out = [];
+      for (let groupIdx = 0; groupIdx <= cutsAngleIndex; groupIdx++) {
+         const group = cutsSequence[groupIdx];
+         if (!group || !Array.isArray(group.steps)) continue;
+         const limit = groupIdx < cutsAngleIndex
+            ? group.steps.length
+            : Math.min(group.steps.length, cutsIndexIndex + 1);
+         for (let stepIdx = 0; stepIdx < limit; stepIdx++) {
+            out.push(group.steps[stepIdx].facet);
+         }
+      }
+      return out;
+   }
+
+   async function applyCutsPreviewFromCursor() {
+      if (!cutsSequence.length || !cutsSourceStone) return;
+
+      const gear = Math.max(1, parseInt(cutsSourceStone.sourceGear, 10) || 96);
+      const designDefinition = {
+         gear,
+         refractiveIndex: ui.ri,
+         facets: buildCutsFacetPreviewSubset(),
+         metadata: cutsSourceStone.metadata || getMetadataFromDesign(),
+      };
+      const stone = buildStoneFromFacetDesign(designDefinition);
+      await applyStoneData(currentModelFilename, stone, { syncDesignFromStone: false, isDesign: true });
+
+      // Keep instruction pane anchored to source instructions while previewing cuts.
+      renderFacetInfo(cutsSourceStone);
+      setFacetStatus(`${cutsSourceStone.facets.length} facets parsed from ${currentModelFilename} (cuts preview)`);
+   }
+
+   function queueCutsNavigation(kind, direction) {
+      cutsActionChain = cutsActionChain
+         .then(async () => {
+            if (!cutsSequence.length) return;
+            if (kind === 'angle') moveCutsAngle(direction);
+            else moveCutsIndex(direction);
+            updateCutsReadout();
+            await applyCutsPreviewFromCursor();
+            requestRender();
+         })
+         .catch((err) => {
+            console.error('Cuts navigation failed:', err);
+         });
+   }
+
+   function captureCutsRestoreState(fromTab) {
+      if (!currentStone) return;
+      cutsRestoreStone = currentStone;
+      cutsRestoreFilename = currentModelFilename;
+      cutsRestoreIsDesign = fromTab === 'design';
+   }
+
+   function setCutsRestoreState(stone, filename, isDesign = false) {
+      cutsRestoreStone = stone || null;
+      cutsRestoreFilename = filename || currentModelFilename || '';
+      cutsRestoreIsDesign = !!isDesign;
+   }
+
+   function queueRestoreAfterCuts() {
+      const restoreStone = cutsRestoreStone;
+      const restoreFilename = cutsRestoreFilename || currentModelFilename;
+      const restoreIsDesign = cutsRestoreIsDesign;
+      if (!restoreStone) return;
+
+      cutsActionChain = cutsActionChain
+         .then(async () => {
+            await applyStoneData(restoreFilename, restoreStone, {
+               syncDesignFromStone: false,
+               isDesign: restoreIsDesign,
+            });
+            requestRender();
+         })
+         .catch((err) => {
+            console.error('Cuts restore failed:', err);
+         });
    }
 
    function getDesignHaloSpec() {
@@ -3944,7 +4162,8 @@ async function setupApp() {
       selectionOverlayCtx.clearRect(0, 0, selectionOverlayCssWidth, selectionOverlayCssHeight);
       const isDesignTab = currentGemTab === 'design';
       const showAnalyseFlatEdges = currentGemTab === 'controls' && ui.lightMode === 4;
-      if (!isDesignTab && !showAnalyseFlatEdges) return;
+      const showCutsEdges = currentGemTab === 'cuts';
+      if (!isDesignTab && !showAnalyseFlatEdges && !showCutsEdges) return;
 
       buildDesignPickCacheIfNeeded();
       if (isDesignTab) drawDesignGearHalo();
@@ -4676,6 +4895,10 @@ async function setupApp() {
          }
       }
 
+      if (!isDesign) {
+         setCutsSequenceFromStone(stone);
+      }
+
       if (syncDesignFromStone) {
          setDesignFromStoneFacets(
             Array.isArray(stone.facets) ? stone.facets : [],
@@ -4849,6 +5072,12 @@ async function setupApp() {
       normalizeStoneToUnitSphere(stone);
 
       await applyStoneData(filename, stone, { syncDesignFromStone: true, isDesign: false });
+
+      // If a new model is loaded while Cuts is active, restore should target this model,
+      // not the model that was active before entering Cuts.
+      if (currentGemTab === 'cuts') {
+         setCutsRestoreState(stone, filename, false);
+      }
    }
 
    function shouldKeepRendering() {
@@ -4896,12 +5125,57 @@ async function setupApp() {
          requestRender();
       },
       onGemTopTabChanged(tabName) {
+         const prevTab = currentGemTab;
          currentGemTab = tabName;
          if (tabName !== 'design') {
             clearDesignSelection(true);
-         } else {
+         }
+
+         if (tabName === 'cuts' && prevTab !== 'cuts') {
+            captureCutsRestoreState(prevTab);
+         }
+
+         if (prevTab === 'cuts' && tabName !== 'cuts') {
+            queueRestoreAfterCuts();
+         }
+
+         if (tabName === 'cuts') {
+            if (!cutsSequence.length) {
+               setCutsSequenceFromStone(cutsSourceStone || currentStone);
+            }
+            updateCutsReadout();
+            queueCutsNavigation('index', 0);
+            requestRender();
+            return;
+         }
+
+         if (prevTab === 'cuts') {
+            updateCutsReadout();
+         }
+
+         if (tabName === 'design') {
             requestRender();
          }
+      },
+      onCutsNavigate(kind, direction) {
+         if (!cutsSequence.length) {
+            setCutsSequenceFromStone(cutsSourceStone || currentStone);
+         }
+         if (!cutsSequence.length) {
+            updateCutsReadout();
+            return;
+         }
+
+         if (kind === 'angle') {
+            moveCutsAngle(direction);
+         } else if (kind === 'index') {
+            moveCutsIndex(direction);
+         } else {
+            return;
+         }
+
+         updateCutsReadout();
+         queueCutsNavigation(kind, 0);
       },
       onFileSelected(name, fileUrl) { loadModel(name, fileUrl); },
       async captureRaytracedStoneForPrint() {

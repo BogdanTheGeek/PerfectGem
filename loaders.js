@@ -1794,6 +1794,84 @@ function groupExternalFacetsForDesign(facets = [], gear) {
    return groupedFacets;
 }
 
+function buildInstructionAngleCutSequence(facets = [], gear) {
+   const g = Math.max(1, parseInt(gear, 10) || 96);
+   const groups = [];
+   const groupByAngle = new Map();
+
+   const normalizeGearIndex = (value) => {
+      const wrapped = wrapGearIndex(value, g);
+      return wrapped === 0 ? g : wrapped;
+   };
+
+   for (const facet of facets) {
+      const tag = String(facet?.instructions || '').trim().toUpperCase();
+      if (tag === 'BOOTSTRAP') continue;
+
+      const angle = computeSignedFacetAngleDeg(facet?.normal || [0, 0, 1]);
+      const angleKey = angle.toFixed(2);
+      let group = groupByAngle.get(angleKey);
+      if (!group) {
+         group = {
+            angleKey,
+            angleDeg: angle,
+            angleLabel: `${Math.abs(angle).toFixed(2)}\u00b0`,
+            cuts: [],
+            _cutByKey: new Map(),
+         };
+         groupByAngle.set(angleKey, group);
+         groups.push(group);
+      }
+
+      const cutKey = makeKeyFromFacet(facet);
+      let cut = group._cutByKey.get(cutKey);
+      if (!cut) {
+         cut = {
+            name: String(facet?.name || '').trim() || '?',
+            instructions: String(facet?.instructions || '').trim(),
+            angleDeg: angle,
+            normal: facet?.normal || [0, 0, 1],
+            d: Number.isFinite(facet?.d) ? Number(facet.d) : 1,
+            indexes: [],
+            _seenIndexes: new Set(),
+         };
+         group._cutByKey.set(cutKey, cut);
+         group.cuts.push(cut);
+      }
+
+      const parsed = parseFacetGearIndex(facet?.normal || [0, 0, 1], g);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+         const nextIndex = normalizeGearIndex(parsed);
+         if (!cut._seenIndexes.has(nextIndex)) {
+            cut._seenIndexes.add(nextIndex);
+            cut.indexes.push(nextIndex);
+         }
+      }
+   }
+
+   for (const group of groups) {
+      delete group._cutByKey;
+      for (const cut of group.cuts) {
+         delete cut._seenIndexes;
+         const indexes = cut.indexes.length
+            ? cut.indexes
+            : [normalizeGearIndex(1)];
+         const inferred = inferSymmetryMirrorFromIndexes(indexes, g);
+         const downFacingFlat = isDownFacingFlatFacet(cut.normal);
+         const distance = downFacingFlat ? -Math.abs(cut.d) : Math.abs(cut.d);
+
+         cut.indexes = indexes;
+         cut.startIndex = inferred.startIndex;
+         cut.symmetry = inferred.symmetry;
+         cut.mirror = inferred.mirror;
+         cut.distance = distance;
+         cut.angleDeg = downFacingFlat ? -0 : cut.angleDeg;
+      }
+   }
+
+   return groups;
+}
+
 function normalizeDesignFacet(inputFacet = {}, fallbackIndex = 0) {
    const parsedSymmetry = parseFloat(inputFacet.symmetry);
    const parsedAngleDeg = parseFloat(inputFacet.angleDeg);
@@ -2371,6 +2449,7 @@ export {
    computeSignedFacetAngleDeg,
    getFacetDistanceValue,
    groupExternalFacetsForDesign,
+   buildInstructionAngleCutSequence,
    normalizeDesignFacet,
    computeFacetNotesSummary,
    stretchStoneByVertices,

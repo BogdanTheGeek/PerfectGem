@@ -549,6 +549,27 @@
             font-family: system-ui, sans-serif;
         }
 
+        .cutsPanel {
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 10px;
+            background: rgba(255,255,255,0.04);
+            padding: 10px;
+            margin-bottom: 12px;
+        }
+        .cutsReadout {
+            color: #d4dae3;
+            font-size: 12px;
+            line-height: 1.4;
+            margin: 0 0 8px;
+            white-space: pre-wrap;
+            min-height: 50px;
+        }
+        .cutsBtnGrid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+
         /* ── Controls toggle (mobile only) ─────────────────────────── */
         #gemui-toggle {
             display: none;
@@ -736,6 +757,7 @@
             <div class="modes" id="gemTopTabs">
                 <div class="mode active" data-gem-tab="controls">Analyse</div>
                 <div class="mode" data-gem-tab="design">Design</div>
+                <div class="mode" data-gem-tab="cuts">Cuts</div>
             </div>
 
             <div id="gemControlsTabPanel" class="gemUiTabPanel active">
@@ -879,55 +901,66 @@
                     <div id="designBody">
                         <div id="designStatus">No custom facets yet.</div>
                     </div>
-                        <div id="designForm">
-                            <div class="designGrid3">
-                                <div class="designRow">
-                                    <label>Gear</label>
-                                    <input type="number" id="designGear" min="4" max="360" step="1" value="96">
-                                </div>
-                                <div class="designRow">
-                                    <label>Symmetry</label>
-                                    <input type="number" id="designSymmetry" min="1" max="96" step="1" value="8">
-                                </div>
-                                <div class="designRow">
-                                    <label class="check"><input type="checkbox" id="designMirror"> Mirror</label>
-                                </div>
+                    <div id="designForm">
+                        <div class="designGrid3">
+                            <div class="designRow">
+                                <label>Gear</label>
+                                <input type="number" id="designGear" min="4" max="360" step="1" value="96">
                             </div>
-                            <div class="designGrid3">
-                                <div class="designRow">
-                                    <label>Angle (deg)</label>
-                                    <input type="number" id="designAngle" min="-90" max="90" step="0.001" value="90">
-                                </div>
-                                <div class="designRow">
-                                    <label>Start Index</label>
-                                    <input type="number" id="designStartIndex" min="0" max="360" step="1" value="0">
-                                </div>
-                                <div class="designRow">
-                                   <label>Distance from Center</label>
-                                    <input type="number" id="designDistance" min="0" max="5" step="0.00001" value="0.7">
-                                </div>
+                            <div class="designRow">
+                                <label>Symmetry</label>
+                                <input type="number" id="designSymmetry" min="1" max="96" step="1" value="8">
                             </div>
-                            <div class="designGrid2">
-                               <div class="designRow">
-                                   <label>Name</label>
-                                   <input type="text" id="designName" value="G1">
-                               </div>
-                               <div class="designRow">
-                                   <label>Instructions</label>
-                                   <input type="text" id="designInstructions" value="">
-                               </div>
+                            <div class="designRow">
+                                <label class="check"><input type="checkbox" id="designMirror"> Mirror</label>
                             </div>
-                            <div class="designBtnRow">
-                                <div class="designBtn" id="designAddFacetBtn">Add Facet</div>
-                                <div class="designBtn" id="designSaveGemBtn">Save</div>
+                        </div>
+                        <div class="designGrid3">
+                            <div class="designRow">
+                                <label>Angle (deg)</label>
+                                <input type="number" id="designAngle" min="-90" max="90" step="0.001" value="90">
                             </div>
-                            <div class="designBtnRow" style="margin-top:8px;">
-                                <div class="designBtn" id="designRecenterBtn">Recenter Stone</div>
-                                <div class="designBtn" id="designUnitSphereBtn">Rescale Unit Sphere</div>
+                            <div class="designRow">
+                                <label>Start Index</label>
+                                <input type="number" id="designStartIndex" min="0" max="360" step="1" value="0">
                             </div>
+                            <div class="designRow">
+                                <label>Distance from Center</label>
+                                <input type="number" id="designDistance" min="0" max="5" step="0.00001" value="0.7">
+                            </div>
+                        </div>
+                        <div class="designGrid2">
+                            <div class="designRow">
+                                <label>Name</label>
+                                <input type="text" id="designName" value="G1">
+                            </div>
+                            <div class="designRow">
+                                <label>Instructions</label>
+                                <input type="text" id="designInstructions" value="">
+                            </div>
+                        </div>
+                        <div class="designBtnRow">
+                            <div class="designBtn" id="designAddFacetBtn">Add Facet</div>
+                            <div class="designBtn" id="designSaveGemBtn">Save</div>
+                        </div>
+                        <div class="designBtnRow" style="margin-top:8px;">
+                            <div class="designBtn" id="designRecenterBtn">Recenter Stone</div>
+                            <div class="designBtn" id="designUnitSphereBtn">Rescale Unit Sphere</div>
                         </div>
                     </div>
                     <div id="designResize" aria-hidden="true"></div>
+                </div>
+            </div>
+
+            <div id="gemCutsTabPanel" class="gemUiTabPanel">
+                <div class="cutsPanel">
+                    <div class="cutsReadout" id="cutsReadout">No cut sequence loaded.</div>
+                    <div class="cutsBtnGrid">
+                        <div class="designBtn" id="cutsAnglePrevBtn"><< Tier</div>
+                        <div class="designBtn" id="cutsAngleNextBtn">Tier >></div>
+                        <div class="designBtn" id="cutsIndexPrevBtn"><< Index</div>
+                        <div class="designBtn" id="cutsIndexNextBtn">Index >></div>
+                    </div>
                 </div>
             </div>
 
