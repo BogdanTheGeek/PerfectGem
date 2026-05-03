@@ -2881,6 +2881,7 @@ async function setupApp() {
       edges: [], // { id, aId, bId, faceIds:number[] }
       faces: [], // { id, normal:[x,y,z], center:[x,y,z], vertexIds:number[] }
    };
+   let meshOverlayEdgeCache = null;
 
    const selectionOverlayCanvas = document.createElement('canvas');
    selectionOverlayCanvas.id = 'selectionOverlayCanvas';
@@ -2925,6 +2926,7 @@ async function setupApp() {
 
    function invalidateDesignPickState(clearSelected = true) {
       designPickDirty = true;
+      meshOverlayEdgeCache = null;
       clearDesignSelection(clearSelected);
    }
 
@@ -2969,6 +2971,187 @@ async function setupApp() {
       return Math.round(v * 100000);
    }
 
+   function buildMeshOverlayEdgeCacheIfNeeded() {
+      const stone = currentStone;
+      if (!stone || !(stone.vertexData instanceof Float32Array) || stone.vertexData.length < 21) {
+         meshOverlayEdgeCache = { stone: null, edges: [] };
+         return meshOverlayEdgeCache;
+      }
+      if (meshOverlayEdgeCache?.stone === stone) return meshOverlayEdgeCache;
+
+      const data = stone.vertexData;
+      const vertexMap = new Map();
+      const vertices = [];
+      const edgeMap = new Map();
+      const floatsPerVertex = 7;
+      const vertsPerTri = 3;
+
+      const getVertexId = (x, y, z) => {
+         const key = `${roundKey(x)}|${roundKey(y)}|${roundKey(z)}`;
+         const found = vertexMap.get(key);
+         if (found != null) return found;
+         const id = vertices.length;
+         vertices.push([x, y, z]);
+         vertexMap.set(key, id);
+         return id;
+      };
+
+      const addEdge = (aId, bId, normal) => {
+         const lo = Math.min(aId, bId);
+         const hi = Math.max(aId, bId);
+         const edgeKey = `${lo}|${hi}`;
+         let edge = edgeMap.get(edgeKey);
+         if (!edge) {
+            edge = { aId: lo, bId: hi, normals: [], triUseCount: 0 };
+            edgeMap.set(edgeKey, edge);
+         }
+         edge.triUseCount += 1;
+         if (Array.isArray(normal) && len3(normal) > 1e-8) {
+            const unit = normalize3(normal);
+            const hasMatch = edge.normals.some((n) => dot3(n, unit) > 1 - 1e-5);
+            if (!hasMatch) edge.normals.push(unit);
+         }
+      };
+
+      const triCount = Math.floor(data.length / (floatsPerVertex * vertsPerTri));
+      for (let t = 0; t < triCount; t++) {
+         const triBase = t * vertsPerTri * floatsPerVertex;
+         const triVerts = [];
+         for (let v = 0; v < vertsPerTri; v++) {
+            const base = triBase + v * floatsPerVertex;
+            const x = Number(data[base + 0]);
+            const y = Number(data[base + 1]);
+            const z = Number(data[base + 2]);
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+            triVerts.push(getVertexId(x, y, z));
+         }
+         if (triVerts.length !== 3) continue;
+
+         const nBase = triBase;
+         const triNormal = normalize3([
+            Number(data[nBase + 3]),
+            Number(data[nBase + 4]),
+            Number(data[nBase + 5]),
+         ]);
+
+         addEdge(triVerts[0], triVerts[1], triNormal);
+         addEdge(triVerts[1], triVerts[2], triNormal);
+         addEdge(triVerts[2], triVerts[0], triNormal);
+      }
+
+      const edges = [];
+      for (const edge of edgeMap.values()) {
+         const a = vertices[edge.aId];
+         const b = vertices[edge.bId];
+         if (!a || !b) continue;
+
+         const hasDistinctAdjacentFaces = edge.normals.length >= 2;
+         const isOpenBoundary = edge.triUseCount === 1;
+         if (!hasDistinctAdjacentFaces && !isOpenBoundary) continue;
+
+         edges.push({
+            a,
+            b,
+            normals: edge.normals,
+            midpoint: scale3(add3(a, b), 0.5),
+         });
+      }
+
+      meshOverlayEdgeCache = { stone, edges };
+      return meshOverlayEdgeCache;
+   }
+
+   function buildFallbackFacesFromStoneMesh(stone, facetList) {
+      const data = stone?.vertexData;
+      const facets = Array.isArray(stone?.facets) ? stone.facets : [];
+      if (!(data instanceof Float32Array) || data.length < 7 || !facets.length) return [];
+
+      const sourceFacets = Array.isArray(facetList) ? facetList : [];
+      const faces = [];
+      const floatsPerVertex = 7;
+      const vertsPerTri = 3;
+      let triOffset = 0;
+
+      const findSourceFacetOrder = (name, instructions) => {
+         const targetName = String(name || '').trim();
+         const targetInst = String(instructions || '').trim();
+         if (!targetName && !targetInst) return -1;
+         return sourceFacets.findIndex((facet) => {
+            const facetName = String(facet?.name || '').trim();
+            const facetInst = String(facet?.instructions || '').trim();
+            return facetName === targetName && facetInst === targetInst;
+         });
+      };
+
+      for (const facet of facets) {
+         const triCount = Math.max(0, Math.round(Number(facet?.triangleCount) || 0));
+         if (triCount <= 0) continue;
+
+         const unique = new Map();
+         for (let t = 0; t < triCount; t++) {
+            const triBase = (triOffset + t) * vertsPerTri * floatsPerVertex;
+            for (let v = 0; v < vertsPerTri; v++) {
+               const base = triBase + v * floatsPerVertex;
+               const x = Number(data[base + 0]);
+               const y = Number(data[base + 1]);
+               const z = Number(data[base + 2]);
+               if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+               const key = `${roundKey(x)}|${roundKey(y)}|${roundKey(z)}`;
+               if (!unique.has(key)) unique.set(key, [x, y, z]);
+            }
+         }
+         triOffset += triCount;
+
+         const verts = [...unique.values()];
+         if (verts.length < 3) continue;
+
+         const normal = Array.isArray(facet?.normal) && facet.normal.length >= 3
+            ? normalize3([Number(facet.normal[0]), Number(facet.normal[1]), Number(facet.normal[2])])
+            : [0, 0, 0];
+         if (len3(normal) <= 1e-8) continue;
+
+         let cx = 0;
+         let cy = 0;
+         let cz = 0;
+         for (const p of verts) {
+            cx += p[0];
+            cy += p[1];
+            cz += p[2];
+         }
+         cx /= verts.length;
+         cy /= verts.length;
+         cz /= verts.length;
+
+         let basis = [1, 0, 0];
+         if (Math.abs(normal[0]) > 0.9) basis = [0, 1, 0];
+         let tangent = normalize3(cross3(normal, basis));
+         if (len3(tangent) <= 1e-8) tangent = normalize3(cross3(normal, [0, 0, 1]));
+         const bitangent = normalize3(cross3(tangent, normal));
+         if (len3(bitangent) <= 1e-8) continue;
+
+         const ordered = verts
+            .map((p) => {
+               const delta = sub3(p, [cx, cy, cz]);
+               const u = dot3(delta, bitangent);
+               const v = dot3(delta, tangent);
+               return { p, angle: Math.atan2(v, u) };
+            })
+            .sort((a, b) => a.angle - b.angle)
+            .map((entry) => entry.p);
+
+         faces.push({
+            name: String(facet?.name || ''),
+            instructions: String(facet?.instructions || ''),
+            normal,
+            vertices: ordered,
+            sourceFacetOrder: findSourceFacetOrder(facet?.name, facet?.instructions),
+            sourceGearIndex: null,
+         });
+      }
+
+      return faces;
+   }
+
    function buildDesignPickCacheIfNeeded() {
       if (!designPickDirty) return;
       designPickDirty = false;
@@ -2993,7 +3176,10 @@ async function setupApp() {
       const sourceFacetList = (Array.isArray(designFacets) && designFacets.length > 0)
          ? designFacets
          : groupExternalFacetsForDesign(Array.isArray(stone.facets) ? stone.facets : [], pickGear);
-      const faces = generateFacesFromFacetList(sourceFacetList, pickGear);
+      let faces = generateFacesFromFacetList(sourceFacetList, pickGear);
+      if (!Array.isArray(faces) || faces.length === 0) {
+         faces = buildFallbackFacesFromStoneMesh(stone, sourceFacetList);
+      }
       if (!Array.isArray(faces) || faces.length === 0) return;
 
       const getVertexId = (x, y, z) => {
@@ -4116,6 +4302,19 @@ async function setupApp() {
          selectionOverlayCtx.stroke();
       };
 
+      const drawEdgePoints = (a, b, width, color = '0,0,0') => {
+         if (!a || !b) return;
+         const sa = modelPointToScreen(a);
+         const sb = modelPointToScreen(b);
+         if (!sa || !sb) return;
+         selectionOverlayCtx.beginPath();
+         selectionOverlayCtx.moveTo(sa.x, sa.y);
+         selectionOverlayCtx.lineTo(sb.x, sb.y);
+         selectionOverlayCtx.strokeStyle = `rgb(${color})`;
+         selectionOverlayCtx.lineWidth = width;
+         selectionOverlayCtx.stroke();
+      };
+
       const cameraModel4 = vec4.fromValues(cameraPos[0], cameraPos[1], cameraPos[2], 1);
       vec4.transformMat4(cameraModel4, cameraModel4, invModelMat);
       if (Math.abs(cameraModel4[3]) > 1e-8) {
@@ -4124,17 +4323,14 @@ async function setupApp() {
             cameraModel4[1] / cameraModel4[3],
             cameraModel4[2] / cameraModel4[3],
          ];
-         const faceVisibility = designPickCache.faces.map((face) => {
-            if (!face || !Array.isArray(face.normal) || len3(face.normal) <= 1e-8) return false;
-            const toCamera = sub3(cameraModel, face.center);
-            return dot3(face.normal, toCamera) > 1e-8;
-         });
-         const selectedEdgeIds = new Set(designSelection.edgeIds);
-         for (const edge of designPickCache.edges) {
-            if (!edge || selectedEdgeIds.has(edge.id)) continue;
-            const isVisible = Array.isArray(edge.faceIds) && edge.faceIds.some((faceId) => faceVisibility[faceId]);
+         const meshEdgeCache = buildMeshOverlayEdgeCacheIfNeeded();
+         for (const edge of meshEdgeCache.edges) {
+            const normals = Array.isArray(edge.normals) ? edge.normals : [];
+            const toCamera = sub3(cameraModel, edge.midpoint);
+            const isVisible = normals.length === 0
+               || normals.some((normal) => dot3(normal, toCamera) > 1e-8);
             if (!isVisible) continue;
-            drawEdge(edge.id, 1, '0,0,0');
+            drawEdgePoints(edge.a, edge.b, 1, '0,0,0');
          }
       }
 
