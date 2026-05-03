@@ -225,6 +225,7 @@ let designHistoryStack = [];
 let designHistoryIndex = -1;
 let designHistoryInputBefore = null;
 let designHistoryRestoreInProgress = false;
+let designNumberScrubDragDepth = 0;
 let designFacetReorderSuppressClickUntil = 0;
 const DESIGN_HISTORY_LIMIT = 120;
 let modelHasTableFacet = false;
@@ -1372,13 +1373,26 @@ async function setupApp() {
    }
 
    function flushPendingDesignApplyNow() {
-      if (!designApplyTimer) return;
-      clearTimeout(designApplyTimer);
-      designApplyTimer = null;
-      const geometryChanged = pendingDesignApplyGeometryChanged;
-      pendingDesignApplyGeometryChanged = false;
-      applyDesignStone(geometryChanged);
+      if (designApplyTimer) {
+         clearTimeout(designApplyTimer);
+         designApplyTimer = null;
+         const geometryChanged = pendingDesignApplyGeometryChanged;
+         pendingDesignApplyGeometryChanged = false;
+         applyDesignStone(geometryChanged);
+      }
       flushDesignInputHistory();
+   }
+
+   function beginDesignNumberScrubDrag() {
+      designNumberScrubDragDepth += 1;
+   }
+
+   function endDesignNumberScrubDrag() {
+      designNumberScrubDragDepth = Math.max(0, designNumberScrubDragDepth - 1);
+   }
+
+   function isDesignNumberScrubDragging() {
+      return designNumberScrubDragDepth > 0;
    }
 
    function undoDesignHistory() {
@@ -1682,14 +1696,21 @@ async function setupApp() {
    }
 
    function scheduleDesignApply(geometryChanged = true) {
-      if (designApplyTimer) clearTimeout(designApplyTimer);
       pendingDesignApplyGeometryChanged = pendingDesignApplyGeometryChanged || Boolean(geometryChanged);
+      if (designApplyTimer) {
+         if (isDesignNumberScrubDragging()) {
+            return;
+         }
+         clearTimeout(designApplyTimer);
+      }
       designApplyTimer = setTimeout(() => {
          designApplyTimer = null;
          const nextGeometryChanged = pendingDesignApplyGeometryChanged;
          pendingDesignApplyGeometryChanged = false;
          applyDesignStone(nextGeometryChanged);
-         flushDesignInputHistory();
+         if (!isDesignNumberScrubDragging()) {
+            flushDesignInputHistory();
+         }
       }, 20);
    }
 
@@ -1883,6 +1904,7 @@ async function setupApp() {
             moved: false,
             vel: 0,
             axisLocked: false,
+            scrubActive: false,
          };
       });
 
@@ -1899,6 +1921,8 @@ async function setupApp() {
             }
             dragState.axisLocked = true;
             dragState.inputEl.setPointerCapture(e.pointerId);
+            dragState.scrubActive = true;
+            beginDesignNumberScrubDrag();
          }
 
          if (!dragState.moved && Math.abs(dx) < 2) return;
@@ -1916,16 +1940,28 @@ async function setupApp() {
 
       const endDrag = (e) => {
          if (!dragState || e.pointerId !== dragState.pointerId) return;
+         const shouldFinalizeHistory = dragState.scrubActive;
          if (dragState.inputEl.hasPointerCapture(dragState.pointerId)) {
             dragState.inputEl.releasePointerCapture(dragState.pointerId);
          }
+         if (dragState.scrubActive) {
+            endDesignNumberScrubDrag();
+         }
          dragState = null;
+         if (shouldFinalizeHistory) {
+            flushPendingDesignApplyNow();
+         }
       };
 
       rootEl.addEventListener('pointerup', endDrag);
       rootEl.addEventListener('pointercancel', endDrag);
       rootEl.addEventListener('lostpointercapture', (e) => {
-         if (dragState && e.pointerId === dragState.pointerId) dragState = null;
+         if (!dragState || e.pointerId !== dragState.pointerId) return;
+         if (dragState.scrubActive) {
+            endDesignNumberScrubDrag();
+            flushPendingDesignApplyNow();
+         }
+         dragState = null;
       });
    }
 
@@ -2473,7 +2509,19 @@ async function setupApp() {
       if (field === 'distance') {
          nextFacet.indexDistances = undefined;
       }
-      designFacets[facetIdx] = normalizeDesignFacet(nextFacet, facetIdx);
+      let nextNormalizedFacet = normalizeDesignFacet(nextFacet, facetIdx);
+      if (field === 'angleDeg') {
+         const selectedVertexId = getSingleSelectedVertexId();
+         if (selectedVertexId != null && doesVertexBelongToFacetRow(selectedVertexId, facetIdx)) {
+            const pivoted = buildFacetWithDistanceFromVertex(nextNormalizedFacet, facetIdx, selectedVertexId);
+            if (pivoted) {
+               nextNormalizedFacet = pivoted.facet;
+               const distanceEl = itemEl.querySelector('[data-field="distance"]');
+               if (distanceEl) distanceEl.value = pivoted.facet.distance.toFixed(5);
+            }
+         }
+      }
+      designFacets[facetIdx] = nextNormalizedFacet;
       updateDesignStatusSummary();
       const geometryChanged = field !== 'name' && field !== 'instructions';
       scheduleDesignApply(geometryChanged);
@@ -2996,7 +3044,15 @@ async function setupApp() {
             const p2 = vertices[ids[2]].p;
             normal = normalize3(cross3(sub3(p1, p0), sub3(p2, p0)));
          }
-         facesCache.push({ id: faceId, normal, center, vertexIds: ids.slice() });
+         facesCache.push({
+            id: faceId,
+            normal,
+            center,
+            vertexIds: ids.slice(),
+            sourceFacetOrder: Number.isFinite(Number(face?.sourceFacetOrder))
+               ? Number(face.sourceFacetOrder)
+               : -1,
+         });
 
          for (let i = 0; i < ids.length; i++) {
             const aRaw = ids[i];
@@ -3294,20 +3350,84 @@ async function setupApp() {
       return list;
    }
 
-   function applyFacetDistanceFromSelectedVertex(facetId) {
-      if (!facetId) return false;
-      if (!Array.isArray(designSelection.vertexIds) || designSelection.vertexIds.length !== 1) return false;
-      if (Array.isArray(designSelection.edgeIds) && designSelection.edgeIds.length > 0) return false;
+   function getSingleSelectedVertexId() {
+      if (!Array.isArray(designSelection.vertexIds) || designSelection.vertexIds.length !== 1) return null;
+      if (Array.isArray(designSelection.edgeIds) && designSelection.edgeIds.length > 0) return null;
+      const selectedVertexId = Number(designSelection.vertexIds[0]);
+      if (!Number.isInteger(selectedVertexId) || selectedVertexId < 0) return null;
+      return selectedVertexId;
+   }
 
-      const facetIdx = designFacets.findIndex((facet) => facet.id === facetId);
-      if (facetIdx < 0) return false;
+   function captureSingleSelectedVertexPosition() {
+      const selectedVertexId = getSingleSelectedVertexId();
+      if (selectedVertexId == null) return null;
+      buildDesignPickCacheIfNeeded();
+      const vertex = designPickCache.vertices[selectedVertexId];
+      if (!vertex || !Array.isArray(vertex.p) || vertex.p.length < 3) return null;
+      const x = Number(vertex.p[0]);
+      const y = Number(vertex.p[1]);
+      const z = Number(vertex.p[2]);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+      return [x, y, z];
+   }
+
+   function rebindSelectionToVertexPosition(position) {
+      if (!Array.isArray(position) || position.length < 3) return false;
+      const px = Number(position[0]);
+      const py = Number(position[1]);
+      const pz = Number(position[2]);
+      if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(pz)) return false;
 
       buildDesignPickCacheIfNeeded();
-      const selectedVertexId = designSelection.vertexIds[0];
-      const vertex = designPickCache.vertices[selectedVertexId];
-      if (!vertex || !Array.isArray(vertex.p) || vertex.p.length < 3) return false;
+      if (!Array.isArray(designPickCache.vertices) || designPickCache.vertices.length === 0) return false;
 
-      const facet = normalizeDesignFacet(designFacets[facetIdx], facetIdx);
+      let best = null;
+      for (const vertex of designPickCache.vertices) {
+         const p = vertex?.p;
+         if (!Array.isArray(p) || p.length < 3) continue;
+         const dx = Number(p[0]) - px;
+         const dy = Number(p[1]) - py;
+         const dz = Number(p[2]) - pz;
+         if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz)) continue;
+         const d2 = dx * dx + dy * dy + dz * dz;
+         if (!best || d2 < best.d2) {
+            best = { id: vertex.id, d2 };
+         }
+      }
+      if (!best) return false;
+
+      const snapTol = Math.max(1e-6, modelBoundsRadius * 1e-3);
+      if (Math.sqrt(best.d2) > snapTol) return false;
+
+      designSelection.vertexIds = [best.id];
+      designSelection.edgeIds = [];
+      return true;
+   }
+
+   function doesVertexBelongToFacetRow(vertexId, facetIdx) {
+      if (!Number.isInteger(vertexId) || vertexId < 0) return false;
+      if (!Number.isInteger(facetIdx) || facetIdx < 0) return false;
+      buildDesignPickCacheIfNeeded();
+      const vertex = designPickCache.vertices[vertexId];
+      if (!vertex || !Array.isArray(vertex.faceIds) || vertex.faceIds.length === 0) return false;
+      for (const faceId of vertex.faceIds) {
+         const face = designPickCache.faces[faceId];
+         if (!face) continue;
+         const sourceFacetOrder = Number(face.sourceFacetOrder);
+         if (Number.isFinite(sourceFacetOrder) && Math.round(sourceFacetOrder) === facetIdx) {
+            return true;
+         }
+      }
+      return false;
+   }
+
+   function buildFacetWithDistanceFromVertex(facetInput, facetIdx, vertexId) {
+      if (!Number.isInteger(vertexId) || vertexId < 0) return null;
+      buildDesignPickCacheIfNeeded();
+      const vertex = designPickCache.vertices[vertexId];
+      if (!vertex || !Array.isArray(vertex.p) || vertex.p.length < 3) return null;
+
+      const facet = normalizeDesignFacet(facetInput, facetIdx);
       const gear = Math.max(1, parseInt(designGearEl.value, 10) || 96);
       const candidateIndexes = buildFacetIndexSetForRow(facet, gear);
 
@@ -3321,11 +3441,10 @@ async function setupApp() {
             best = { idx, requiredDistance, score };
          }
       }
-      if (!best) return false;
+      if (!best) return null;
 
       const keepNegativeFlat = Math.abs(facet.angleDeg) <= 1e-8 && Number(facet.distance) < 0;
-      const historyBefore = snapshotDesignFacets();
-      designFacets[facetIdx] = normalizeDesignFacet(
+      const nextFacet = normalizeDesignFacet(
          {
             ...facet,
             distance: keepNegativeFlat ? -best.requiredDistance : best.requiredDistance,
@@ -3333,11 +3452,30 @@ async function setupApp() {
          },
          facetIdx,
       );
+      return {
+         facet: nextFacet,
+         best,
+      };
+   }
+
+   function applyFacetDistanceFromSelectedVertex(facetId) {
+      if (!facetId) return false;
+      const selectedVertexId = getSingleSelectedVertexId();
+      if (selectedVertexId == null) return false;
+
+      const facetIdx = designFacets.findIndex((facet) => facet.id === facetId);
+      if (facetIdx < 0) return false;
+
+      const pivoted = buildFacetWithDistanceFromVertex(designFacets[facetIdx], facetIdx, selectedVertexId);
+      if (!pivoted) return false;
+
+      const historyBefore = snapshotDesignFacets();
+      designFacets[facetIdx] = pivoted.facet;
 
       renderDesignFacetList();
       scheduleDesignApply();
-   commitDesignHistory(historyBefore);
-      setDesignStatus(`Set ${facet.name || `F${facetIdx + 1}`} distance to meet selected vertex on index ${best.idx}`);
+      commitDesignHistory(historyBefore);
+      setDesignStatus(`Set ${pivoted.facet.name || `F${facetIdx + 1}`} distance to meet selected vertex on index ${pivoted.best.idx}`);
       return true;
    }
 
@@ -4354,6 +4492,8 @@ async function setupApp() {
       const isDesign = options.isDesign ?? false;
       currentModelFilename = filename;
 
+      const selectedVertexPosition = isDesign ? captureSingleSelectedVertexPosition() : null;
+
       currentStone = stone;
       designHaloCache = null;
       invalidateDesignPickState(true);
@@ -4462,6 +4602,10 @@ async function setupApp() {
             stone.sourceGear,
          );
          setMetadataToDesign(stone.metadata);
+      }
+
+      if (isDesign && selectedVertexPosition) {
+         rebindSelectionToVertexPosition(selectedVertexPosition);
       }
 
       scheduleGraphUpdate('model load');
