@@ -1791,7 +1791,8 @@ async function setupApp() {
       return true;
    }
 
-   function setDesignFromStoneFacets(facets = [], sourceGear) {
+   function setDesignFromStoneFacets(facets = [], sourceGear, options = {}) {
+      const { resetHistory = true } = options;
       const gear = parseInt(sourceGear, 10);
       const hasSourceGear = Number.isFinite(gear) && gear > 0;
       if (!hasSourceGear) {
@@ -1833,7 +1834,7 @@ async function setupApp() {
 
       designFacets = grouped.map((facet, idx) => normalizeDesignFacet(facet, idx));
       renderDesignFacetList();
-      resetDesignHistory();
+   if (resetHistory) resetDesignHistory();
    }
 
    function installNumberDragScrub(rootEl) {
@@ -4449,13 +4450,15 @@ async function setupApp() {
       designApplyScaleBtn.addEventListener('click', () => {
          const crownVal = parseFloat(designCrownRatioSlider.value) || 1.0;
          const pavVal = parseFloat(designPavilionRatioSlider.value) || 1.0;
+         const historyBefore = snapshotDesignFacets();
          suspendScaleAdjust = true;
          try {
             const { stone, gear } = buildScaledDesignStone(crownVal, pavVal);
             console.log(`Applying scales crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)} for gear ${gear}`);
             applyStoneData(currentModelFilename, stone, { syncDesignFromStone: false, isDesign: true });
             // rebuild design facets table from new stone
-            setDesignFromStoneFacets(stone.facets || [], stone.sourceGear);
+            setDesignFromStoneFacets(stone.facets || [], stone.sourceGear, { resetHistory: false });
+            commitDesignHistory(historyBefore);
             setDesignStatus(`Applied scales crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)}`);
          } catch (err) {
             console.error(err);
