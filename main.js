@@ -2011,13 +2011,13 @@ async function setupApp() {
 
       const finishReorder = (state) => {
          const fromIdx = designFacets.findIndex((facet) => facet.id === state.sourceId);
-         if (fromIdx < 0) return;
+         if (fromIdx < 0) return false;
          const dropIndex = Math.max(0, Math.min(state.dropIndex, designFacets.length));
-         if (dropIndex === fromIdx || dropIndex === fromIdx + 1) return;
+         if (dropIndex === fromIdx || dropIndex === fromIdx + 1) return false;
 
          const next = designFacets.slice();
          const [moved] = next.splice(fromIdx, 1);
-         if (!moved) return;
+         if (!moved) return false;
          const targetIdx = dropIndex > fromIdx ? dropIndex - 1 : dropIndex;
          next.splice(targetIdx, 0, moved);
 
@@ -2025,6 +2025,7 @@ async function setupApp() {
          renderDesignFacetList();
          scheduleDesignApply(false);
          commitDesignHistory(state.beforeSnapshot);
+         return true;
       };
 
       rootEl.addEventListener('pointerdown', (e) => {
@@ -2081,8 +2082,10 @@ async function setupApp() {
          }
 
          if (state.mode === 'vertical' && state.beforeSnapshot) {
-            finishReorder(state);
-            designFacetReorderSuppressClickUntil = Date.now() + 220;
+            const didReorder = finishReorder(state);
+            if (didReorder) {
+               designFacetReorderSuppressClickUntil = Date.now() + 220;
+            }
          }
 
          clearDragClasses();
@@ -2544,6 +2547,15 @@ async function setupApp() {
          commitDesignHistory(historyBefore);
          return;
       }
+
+      const distanceInputEl = itemEl.querySelector('[data-field="distance"]');
+      if (!distanceInputEl) return;
+      const distanceCellEl = distanceInputEl.closest('td');
+      const clickedDistanceControl = e.target.closest('[data-field="distance"]');
+      const clickedCellEl = e.target.closest('td');
+      const isDistanceInteraction = clickedDistanceControl
+         || (distanceCellEl && clickedCellEl && clickedCellEl === distanceCellEl);
+      if (!isDistanceInteraction) return;
 
       if (applyFacetDistanceFromSelectedVertex(itemEl.dataset.id)) {
          requestRender();
