@@ -2881,7 +2881,6 @@ async function setupApp() {
       edges: [], // { id, aId, bId, faceIds:number[] }
       faces: [], // { id, normal:[x,y,z], center:[x,y,z], vertexIds:number[] }
    };
-   let meshOverlayEdgeCache = null;
 
    const selectionOverlayCanvas = document.createElement('canvas');
    selectionOverlayCanvas.id = 'selectionOverlayCanvas';
@@ -2926,7 +2925,6 @@ async function setupApp() {
 
    function invalidateDesignPickState(clearSelected = true) {
       designPickDirty = true;
-      meshOverlayEdgeCache = null;
       clearDesignSelection(clearSelected);
    }
 
@@ -2969,96 +2967,6 @@ async function setupApp() {
 
    function roundKey(v) {
       return Math.round(v * 100000);
-   }
-
-   function buildMeshOverlayEdgeCacheIfNeeded() {
-      const stone = currentStone;
-      if (!stone || !(stone.vertexData instanceof Float32Array) || stone.vertexData.length < 21) {
-         meshOverlayEdgeCache = { stone: null, edges: [] };
-         return meshOverlayEdgeCache;
-      }
-      if (meshOverlayEdgeCache?.stone === stone) return meshOverlayEdgeCache;
-
-      const data = stone.vertexData;
-      const vertexMap = new Map();
-      const vertices = [];
-      const edgeMap = new Map();
-      const floatsPerVertex = 7;
-      const vertsPerTri = 3;
-
-      const getVertexId = (x, y, z) => {
-         const key = `${roundKey(x)}|${roundKey(y)}|${roundKey(z)}`;
-         const found = vertexMap.get(key);
-         if (found != null) return found;
-         const id = vertices.length;
-         vertices.push([x, y, z]);
-         vertexMap.set(key, id);
-         return id;
-      };
-
-      const addEdge = (aId, bId, normal) => {
-         const lo = Math.min(aId, bId);
-         const hi = Math.max(aId, bId);
-         const edgeKey = `${lo}|${hi}`;
-         let edge = edgeMap.get(edgeKey);
-         if (!edge) {
-            edge = { aId: lo, bId: hi, normals: [], triUseCount: 0 };
-            edgeMap.set(edgeKey, edge);
-         }
-         edge.triUseCount += 1;
-         if (Array.isArray(normal) && len3(normal) > 1e-8) {
-            const unit = normalize3(normal);
-            const hasMatch = edge.normals.some((n) => dot3(n, unit) > 1 - 1e-5);
-            if (!hasMatch) edge.normals.push(unit);
-         }
-      };
-
-      const triCount = Math.floor(data.length / (floatsPerVertex * vertsPerTri));
-      for (let t = 0; t < triCount; t++) {
-         const triBase = t * vertsPerTri * floatsPerVertex;
-         const triVerts = [];
-         for (let v = 0; v < vertsPerTri; v++) {
-            const base = triBase + v * floatsPerVertex;
-            const x = Number(data[base + 0]);
-            const y = Number(data[base + 1]);
-            const z = Number(data[base + 2]);
-            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
-            triVerts.push(getVertexId(x, y, z));
-         }
-         if (triVerts.length !== 3) continue;
-
-         const nBase = triBase;
-         const triNormal = normalize3([
-            Number(data[nBase + 3]),
-            Number(data[nBase + 4]),
-            Number(data[nBase + 5]),
-         ]);
-
-         addEdge(triVerts[0], triVerts[1], triNormal);
-         addEdge(triVerts[1], triVerts[2], triNormal);
-         addEdge(triVerts[2], triVerts[0], triNormal);
-      }
-
-      const edges = [];
-      for (const edge of edgeMap.values()) {
-         const a = vertices[edge.aId];
-         const b = vertices[edge.bId];
-         if (!a || !b) continue;
-
-         const hasDistinctAdjacentFaces = edge.normals.length >= 2;
-         const isOpenBoundary = edge.triUseCount === 1;
-         if (!hasDistinctAdjacentFaces && !isOpenBoundary) continue;
-
-         edges.push({
-            a,
-            b,
-            normals: edge.normals,
-            midpoint: scale3(add3(a, b), 0.5),
-         });
-      }
-
-      meshOverlayEdgeCache = { stone, edges };
-      return meshOverlayEdgeCache;
    }
 
    function buildFallbackFacesFromStoneMesh(stone, facetList) {
@@ -3176,9 +3084,9 @@ async function setupApp() {
       const sourceFacetList = (Array.isArray(designFacets) && designFacets.length > 0)
          ? designFacets
          : groupExternalFacetsForDesign(Array.isArray(stone.facets) ? stone.facets : [], pickGear);
-      let faces = generateFacesFromFacetList(sourceFacetList, pickGear);
+      let faces = buildFallbackFacesFromStoneMesh(stone, sourceFacetList);
       if (!Array.isArray(faces) || faces.length === 0) {
-         faces = buildFallbackFacesFromStoneMesh(stone, sourceFacetList);
+         faces = generateFacesFromFacetList(sourceFacetList, pickGear);
       }
       if (!Array.isArray(faces) || faces.length === 0) return;
 
@@ -3676,14 +3584,27 @@ async function setupApp() {
       const gear = Math.max(1, parseInt(designGearEl.value, 10) || 96);
       const candidateIndexes = buildFacetIndexSetForRow(facet, gear);
 
+      const startIndex = wrapDesignGearIndex(Number(facet.startIndex) || 0, gear);
+      const vx = Number(vertex.p[0]) || 0;
+      const vy = Number(vertex.p[1]) || 0;
+      const vertexTurns = Math.atan2(vx, -vy) / (Math.PI * 2);
+      const vertexIndex = wrapDesignGearIndex(Math.round(vertexTurns * gear), gear);
+      const circularDistance = (a, b) => {
+         const da = Math.abs(wrapDesignGearIndex(a, gear) - wrapDesignGearIndex(b, gear));
+         return Math.min(da, gear - da);
+      };
+
       let best = null;
       for (const idx of candidateIndexes) {
          const normal = computeFacetNormalFromParams(gear, idx, facet.angleDeg, facet.distance);
          const requiredDistance = Math.abs(dot3(normal, vertex.p));
          if (!Number.isFinite(requiredDistance)) continue;
-         const score = Math.abs(requiredDistance - Math.abs(Number(facet.distance) || 0));
-         if (!best || score < best.score) {
-            best = { idx, requiredDistance, score };
+         const vertexIndexDistance = circularDistance(idx, vertexIndex);
+         const startIndexDistance = circularDistance(idx, startIndex);
+         if (!best
+            || vertexIndexDistance < best.vertexIndexDistance
+            || (vertexIndexDistance === best.vertexIndexDistance && startIndexDistance < best.startIndexDistance)) {
+            best = { idx, requiredDistance, vertexIndexDistance, startIndexDistance };
          }
       }
       if (!best) return null;
@@ -3872,14 +3793,25 @@ async function setupApp() {
       }
 
       if (designSelection.vertexIds.length === 1 && designSelection.edgeIds.length === 0) {
-         const vertex = designPickCache.vertices[designSelection.vertexIds[0]];
+         const selectedVertexId = Number(designSelection.vertexIds[0]);
+         const vertex = designPickCache.vertices[selectedVertexId];
          if (!vertex) return result;
          const dist = len3(vertex.p);
 
+         const inputFacet = readCreateFacetFromInputs();
+         const pivoted = Number.isInteger(selectedVertexId)
+            ? buildFacetWithDistanceFromVertex(inputFacet, designFacets.length, selectedVertexId)
+            : null;
          const facetNormal = computeFacetNormalFromDesignInputs();
-         const planeDist = Math.abs(dot3(facetNormal, vertex.p));
+         const fallbackDist = Math.abs(dot3(facetNormal, vertex.p));
+         const planeDist = (pivoted?.facet && Number.isFinite(pivoted.facet.distance))
+            ? Math.abs(Number(pivoted.facet.distance))
+            : fallbackDist;
+
          if (Number.isFinite(planeDist)) {
-            designDistanceEl.value = Math.max(0, planeDist).toFixed(5);
+            const keepNegativeFlat = Math.abs(Number(inputFacet.angleDeg) || 0) <= 1e-8 && Number(inputFacet.distance) < 0;
+            const signedDistance = keepNegativeFlat ? -planeDist : planeDist;
+            designDistanceEl.value = signedDistance.toFixed(5);
          }
 
          result.title = 'Vertex';
@@ -4302,19 +4234,6 @@ async function setupApp() {
          selectionOverlayCtx.stroke();
       };
 
-      const drawEdgePoints = (a, b, width, color = '0,0,0') => {
-         if (!a || !b) return;
-         const sa = modelPointToScreen(a);
-         const sb = modelPointToScreen(b);
-         if (!sa || !sb) return;
-         selectionOverlayCtx.beginPath();
-         selectionOverlayCtx.moveTo(sa.x, sa.y);
-         selectionOverlayCtx.lineTo(sb.x, sb.y);
-         selectionOverlayCtx.strokeStyle = `rgb(${color})`;
-         selectionOverlayCtx.lineWidth = width;
-         selectionOverlayCtx.stroke();
-      };
-
       const cameraModel4 = vec4.fromValues(cameraPos[0], cameraPos[1], cameraPos[2], 1);
       vec4.transformMat4(cameraModel4, cameraModel4, invModelMat);
       if (Math.abs(cameraModel4[3]) > 1e-8) {
@@ -4323,14 +4242,17 @@ async function setupApp() {
             cameraModel4[1] / cameraModel4[3],
             cameraModel4[2] / cameraModel4[3],
          ];
-         const meshEdgeCache = buildMeshOverlayEdgeCacheIfNeeded();
-         for (const edge of meshEdgeCache.edges) {
-            const normals = Array.isArray(edge.normals) ? edge.normals : [];
-            const toCamera = sub3(cameraModel, edge.midpoint);
-            const isVisible = normals.length === 0
-               || normals.some((normal) => dot3(normal, toCamera) > 1e-8);
+         const faceVisibility = designPickCache.faces.map((face) => {
+            if (!face || !Array.isArray(face.normal) || len3(face.normal) <= 1e-8) return false;
+            const toCamera = sub3(cameraModel, face.center);
+            return dot3(face.normal, toCamera) > 1e-8;
+         });
+         const selectedEdgeIds = new Set(designSelection.edgeIds);
+         for (const edge of designPickCache.edges) {
+            if (!edge || selectedEdgeIds.has(edge.id)) continue;
+            const isVisible = Array.isArray(edge.faceIds) && edge.faceIds.some((faceId) => faceVisibility[faceId]);
             if (!isVisible) continue;
-            drawEdgePoints(edge.a, edge.b, 1, '0,0,0');
+            drawEdge(edge.id, 1, '0,0,0');
          }
       }
 
