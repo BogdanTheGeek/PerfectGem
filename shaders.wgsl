@@ -537,7 +537,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         // Silhouette rim
         let rim = pow(1.0 - NdotV, 4.0) * 0.25;
 
-        let col = stoneColor * diffuse + vec3<f32>(spec + rim);
+        let col = stoneColor * (diffuse * 0.6 + 0.4) + vec3<f32>(spec + rim);
         return vec4<f32>(aces_tonemap_fast(col * 0.3), 1.0);
     }
 

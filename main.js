@@ -3052,6 +3052,9 @@ async function setupApp() {
             sourceFacetOrder: Number.isFinite(Number(face?.sourceFacetOrder))
                ? Number(face.sourceFacetOrder)
                : -1,
+            sourceGearIndex: Number.isFinite(Number(face?.sourceGearIndex))
+               ? Number(face.sourceGearIndex)
+               : null,
          });
 
          for (let i = 0; i < ids.length; i++) {
@@ -3145,6 +3148,39 @@ async function setupApp() {
          dist: len3(sub3(pRay, pSeg)),
          rayT: sc,
       };
+   }
+
+   function intersectRayWithFacePolygon(rayOrigin, rayDir, face, vertices) {
+      if (!face || !Array.isArray(face.vertexIds) || face.vertexIds.length < 3) return null;
+      const normal = Array.isArray(face.normal) ? face.normal : null;
+      if (!normal || len3(normal) <= 1e-8) return null;
+
+      const p0 = vertices[face.vertexIds[0]]?.p;
+      if (!p0) return null;
+
+      const denom = dot3(normal, rayDir);
+      if (Math.abs(denom) <= 1e-8) return null;
+
+      const rayT = dot3(normal, sub3(p0, rayOrigin)) / denom;
+      if (!Number.isFinite(rayT) || rayT < 0) return null;
+
+      const hitPoint = add3(rayOrigin, scale3(rayDir, rayT));
+      let hasPos = false;
+      let hasNeg = false;
+
+      for (let i = 0; i < face.vertexIds.length; i++) {
+         const a = vertices[face.vertexIds[i]]?.p;
+         const b = vertices[face.vertexIds[(i + 1) % face.vertexIds.length]]?.p;
+         if (!a || !b) return null;
+         const edge = sub3(b, a);
+         const toHit = sub3(hitPoint, a);
+         const side = dot3(normal, cross3(edge, toHit));
+         if (side > 1e-7) hasPos = true;
+         else if (side < -1e-7) hasNeg = true;
+         if (hasPos && hasNeg) return null;
+      }
+
+      return { rayT };
    }
 
    function cursorToModelRay(clientX, clientY) {
@@ -3243,7 +3279,18 @@ async function setupApp() {
             bestEdge = { type: 'edge', id: edge.id, dist: hit.dist };
          }
       }
-      return bestEdge;
+      if (bestEdge) return bestEdge;
+
+      let bestFace = null;
+      for (const face of designPickCache.faces) {
+         if (!face || !faceVisibility[face.id]) continue;
+         const hit = intersectRayWithFacePolygon(ray.origin, ray.dir, face, designPickCache.vertices);
+         if (!hit) continue;
+         if (!bestFace || hit.rayT < bestFace.rayT) {
+            bestFace = { type: 'face', id: face.id, dist: 0, rayT: hit.rayT };
+         }
+      }
+      return bestFace;
    }
 
    function setSelectionFromHover(additiveSelection) {
@@ -3599,6 +3646,7 @@ async function setupApp() {
       const result = {
          title: '',
          details: '',
+         lines: [],
       };
 
       const stoneWidth = computeStoneWidthForSelection();
@@ -3610,8 +3658,17 @@ async function setupApp() {
          result.title = 'Edge';
          if (Number.isFinite(edgeMetric.percent)) {
             result.details = `Length ${edgeMetric.length.toFixed(5)} (${edgeMetric.percent.toFixed(2)}% width)`;
+            result.lines = [
+               'Edge',
+               `Length: ${edgeMetric.length.toFixed(5)}`,
+               `Width: ${edgeMetric.percent.toFixed(2)}%`,
+            ];
          } else {
             result.details = `Length ${edgeMetric.length.toFixed(5)}`;
+            result.lines = [
+               'Edge',
+               `Length: ${edgeMetric.length.toFixed(5)}`,
+            ];
          }
          return result;
       }
@@ -3629,6 +3686,11 @@ async function setupApp() {
 
          result.title = 'Vertex';
          result.details = `Origin dist ${dist.toFixed(5)}, facet dist ${planeDist.toFixed(5)} (autofill)`;
+         result.lines = [
+            'Vertex',
+            `Origin Dist: ${dist.toFixed(5)}`,
+            `Facet Dist: ${planeDist.toFixed(5)} (autofill)`,
+         ];
          return result;
       }
 
@@ -3806,6 +3868,92 @@ async function setupApp() {
       return result;
    }
 
+   function buildHoveredFaceTooltipLines() {
+      if (designHover?.type !== 'face') return [];
+      const face = designPickCache.faces[designHover.id];
+      if (!face) return [];
+
+      const sourceFacetOrder = Number.isFinite(Number(face.sourceFacetOrder))
+         ? Math.max(0, Math.round(Number(face.sourceFacetOrder)))
+         : null;
+
+      const designFacet = sourceFacetOrder != null ? designFacets[sourceFacetOrder] : null;
+      const stoneFacet = sourceFacetOrder != null ? currentStone?.facets?.[sourceFacetOrder] : null;
+      const facet = designFacet ?? stoneFacet ?? null;
+
+      const parseFacetIndexList = (value) => {
+         if (Array.isArray(value)) {
+            return [...new Set(
+               value
+                  .map((entry) => Number(entry))
+                  .filter((entry) => Number.isFinite(entry))
+                  .map((entry) => wrapDesignGearIndex(Math.round(entry), Math.max(1, parseInt(designGearEl.value, 10) || 96))),
+            )];
+         }
+         if (typeof value !== 'string') return [];
+         return [...new Set(
+            value
+               .split(/[^0-9]+/)
+               .map((entry) => Number(entry))
+               .filter((entry) => Number.isFinite(entry) && entry > 0)
+               .map((entry) => wrapDesignGearIndex(Math.round(entry), Math.max(1, parseInt(designGearEl.value, 10) || 96))),
+         )];
+      };
+
+      const allowedIndexes = parseFacetIndexList(facet?.indexes);
+      const faceGearIndex = Number.isFinite(Number(face.sourceGearIndex))
+         ? wrapDesignGearIndex(Number(face.sourceGearIndex), Math.max(1, parseInt(designGearEl.value, 10) || 96))
+         : null;
+      let displayIndex = faceGearIndex;
+      if (allowedIndexes.length) {
+         displayIndex = (faceGearIndex != null && allowedIndexes.includes(faceGearIndex))
+            ? faceGearIndex
+            : allowedIndexes[0];
+      }
+      if (displayIndex == null) {
+         displayIndex = sourceFacetOrder ?? Math.max(0, Math.round(Number(face.id) || 0));
+      }
+
+      const rawName = String(facet?.name || '').trim();
+      const name = rawName || `Facet #${displayIndex}`;
+
+      return [
+         'Facet Hover',
+         `Facet Index: ${displayIndex}`,
+         `Name: ${name}`,
+      ];
+   }
+
+   function wrapTooltipLine(text, maxWidth) {
+      const normalized = String(text || '').trim();
+      if (!normalized) return [];
+      if (selectionOverlayCtx.measureText(normalized).width <= maxWidth) return [normalized];
+
+      const words = normalized.split(/\s+/).filter(Boolean);
+      if (!words.length) return [normalized];
+
+      const lines = [];
+      let current = words[0];
+      for (let i = 1; i < words.length; i++) {
+         const next = `${current} ${words[i]}`;
+         if (selectionOverlayCtx.measureText(next).width <= maxWidth) {
+            current = next;
+         } else {
+            lines.push(current);
+            current = words[i];
+         }
+      }
+      if (current) lines.push(current);
+      return lines;
+   }
+
+   function resolveTooltipLines() {
+      const metric = buildSelectionMetric();
+      if (Array.isArray(metric.lines) && metric.lines.length) return metric.lines;
+      if (metric.title && metric.details) return [metric.title, metric.details];
+      return buildHoveredFaceTooltipLines();
+   }
+
    function modelPointToScreen(point) {
       const rect = canvas.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return null;
@@ -3918,26 +4066,28 @@ async function setupApp() {
 
    function drawDesignSelectionOverlay() {
       selectionOverlayCtx.clearRect(0, 0, selectionOverlayCssWidth, selectionOverlayCssHeight);
-      if (currentGemTab !== 'design') return;
+      const isDesignTab = currentGemTab === 'design';
+      const showAnalyseFlatEdges = currentGemTab === 'controls' && ui.lightMode === 4;
+      if (!isDesignTab && !showAnalyseFlatEdges) return;
 
       buildDesignPickCacheIfNeeded();
-      drawDesignGearHalo();
+      if (isDesignTab) drawDesignGearHalo();
 
-      const drawVertex = (vertexId, radius, alpha) => {
+      const drawVertex = (vertexId, radius) => {
          const vertex = designPickCache.vertices[vertexId];
          if (!vertex) return;
          const screen = modelPointToScreen(vertex.p);
          if (!screen) return;
          selectionOverlayCtx.beginPath();
          selectionOverlayCtx.arc(screen.x, screen.y, radius, 0, Math.PI * 2);
-         selectionOverlayCtx.fillStyle = `rgba(40,255,120,${alpha})`;
+         selectionOverlayCtx.fillStyle = 'rgb(40,255,120)';
          selectionOverlayCtx.fill();
          selectionOverlayCtx.strokeStyle = 'rgba(20,160,80,0.95)';
          selectionOverlayCtx.lineWidth = 1.5;
          selectionOverlayCtx.stroke();
       };
 
-      const drawEdge = (edgeId, width, alpha) => {
+      const drawEdge = (edgeId, width, color = '40,255,120') => {
          const edge = designPickCache.edges[edgeId];
          if (!edge) return;
          const a = designPickCache.vertices[edge.aId]?.p;
@@ -3949,37 +4099,78 @@ async function setupApp() {
          selectionOverlayCtx.beginPath();
          selectionOverlayCtx.moveTo(sa.x, sa.y);
          selectionOverlayCtx.lineTo(sb.x, sb.y);
-         selectionOverlayCtx.strokeStyle = `rgba(40,255,120,${alpha})`;
+         selectionOverlayCtx.strokeStyle = `rgb(${color})`;
          selectionOverlayCtx.lineWidth = width;
          selectionOverlayCtx.stroke();
       };
 
-      for (const vertexId of designSelection.vertexIds) drawVertex(vertexId, 6, 0.85);
-      for (const edgeId of designSelection.edgeIds) drawEdge(edgeId, 3, 0.85);
+      const cameraModel4 = vec4.fromValues(cameraPos[0], cameraPos[1], cameraPos[2], 1);
+      vec4.transformMat4(cameraModel4, cameraModel4, invModelMat);
+      if (Math.abs(cameraModel4[3]) > 1e-8) {
+         const cameraModel = [
+            cameraModel4[0] / cameraModel4[3],
+            cameraModel4[1] / cameraModel4[3],
+            cameraModel4[2] / cameraModel4[3],
+         ];
+         const faceVisibility = designPickCache.faces.map((face) => {
+            if (!face || !Array.isArray(face.normal) || len3(face.normal) <= 1e-8) return false;
+            const toCamera = sub3(cameraModel, face.center);
+            return dot3(face.normal, toCamera) > 1e-8;
+         });
+         const selectedEdgeIds = new Set(designSelection.edgeIds);
+         for (const edge of designPickCache.edges) {
+            if (!edge || selectedEdgeIds.has(edge.id)) continue;
+            const isVisible = Array.isArray(edge.faceIds) && edge.faceIds.some((faceId) => faceVisibility[faceId]);
+            if (!isVisible) continue;
+            drawEdge(edge.id, 1, '0,0,0');
+         }
+      }
 
-      if (designHover?.type === 'vertex') drawVertex(designHover.id, 4, 0.6);
-      if (designHover?.type === 'edge') drawEdge(designHover.id, 2, 0.6);
+         if (!isDesignTab) return;
 
-      const metric = buildSelectionMetric();
-      if (!metric.title || !metric.details) return;
-      const text = `${metric.title}: ${metric.details}`;
+      for (const vertexId of designSelection.vertexIds) drawVertex(vertexId, 6);
+      for (const edgeId of designSelection.edgeIds) drawEdge(edgeId, 3);
+
+      if (designHover?.type === 'vertex') drawVertex(designHover.id, 4);
+      if (designHover?.type === 'edge') drawEdge(designHover.id, 2);
+
+      const rawLines = resolveTooltipLines();
+      if (!Array.isArray(rawLines) || !rawLines.length) return;
+
       const x = Math.max(16, Math.min(window.innerWidth - 16, designPointerClientX + 14));
       const y = Math.max(16, Math.min(window.innerHeight - 16, designPointerClientY + 14));
+
       selectionOverlayCtx.font = '12px system-ui, sans-serif';
-      const textWidth = selectionOverlayCtx.measureText(text).width;
+      const maxTextWidth = Math.max(150, Math.min(360, selectionOverlayCssWidth * 0.42));
+      const lines = [];
+      for (const line of rawLines) {
+         lines.push(...wrapTooltipLine(line, maxTextWidth));
+      }
+      if (!lines.length) return;
+
+      let textWidth = 0;
+      for (const line of lines) {
+         const width = selectionOverlayCtx.measureText(line).width;
+         if (width > textWidth) textWidth = width;
+      }
+
       const pad = 8;
       const boxW = textWidth + pad * 2;
-      const boxH = 24;
-      const bx = Math.min(window.innerWidth - boxW - 8, x);
-      const by = Math.min(window.innerHeight - boxH - 8, y);
+      const lineHeight = 16;
+      const boxH = pad * 2 + lines.length * lineHeight;
+      const bx = Math.min(Math.max(8, selectionOverlayCssWidth - boxW - 8), x);
+      const by = Math.min(Math.max(8, selectionOverlayCssHeight - boxH - 8), y);
+
       selectionOverlayCtx.fillStyle = 'rgba(0,0,0,0.74)';
       selectionOverlayCtx.fillRect(bx, by, boxW, boxH);
       selectionOverlayCtx.strokeStyle = 'rgba(40,255,120,0.75)';
       selectionOverlayCtx.lineWidth = 1;
       selectionOverlayCtx.strokeRect(bx + 0.5, by + 0.5, boxW - 1, boxH - 1);
       selectionOverlayCtx.fillStyle = 'rgba(210,255,225,0.95)';
-      selectionOverlayCtx.textBaseline = 'middle';
-      selectionOverlayCtx.fillText(text, bx + pad, by + boxH / 2);
+      selectionOverlayCtx.textBaseline = 'top';
+      for (let i = 0; i < lines.length; i++) {
+         selectionOverlayCtx.fillText(lines[i], bx + pad, by + pad + i * lineHeight);
+      }
    }
 
    function packUniformData(out, modelMatrix, projectionMatrix, time, lightMode, graphMode, flatShading) {
