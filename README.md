@@ -1,10 +1,29 @@
-# WebRay
+# Perfect Gem
 
-Check it out here: https://bogdanthegeek.github.io/WebRay/
+A browser-based analysis and design tool for faceted gemstones.
+Check it out here: https://bogdanthegeek.github.io/PerfectGem/
 
-My attempt at rewiriting [GemRay](https://www.gemcad.com/gemray.html) in a portable way using WebGL and fast enough to allow it to render in realtime.
+## Features
+- Works on desktop(WebGL supported Browsers) and mobile(Android and iOS).
+- Import and export .asc, .gem, and .gcs designs[^1]
+- Adjust stone colour, RI, dispersion etc.
+- Adjust focal length and internal resolution.
+- Performance graphs for ISO, COS, SC2.
+- Multiple tilt animations
+- Export animation as .mp4 video
+- Print faceting diagrams
+- Integrated with the largest online database of desings.
 
-It's absolutely not feature complete, and the rendering maths may not be completely correct.
-Working on adding more features like frosted facets.
+Experimental:
+- Add and remove facets.
+- Meetpoint faceting.
+- Scale all Crown and Pavilion angles for the best performance
 
-Almost all of the code was initially vibe coded in order to itterate quickly. I will end up refractoring this once I have more time to work on it.
+
+[^1]: Full feature compatibility may vary.
+
+
+## History
+While working with Robert Strickland on open-sourcing [GemRay](https://www.gemcad.com/gemray.html), which is now available [here](https://github.com/rwstrickland/GemRay), I started playing around with trying to do the same in the browser. I have wanted to use WebGPU for a while, so this seemed like a good opportunity.
+I vibed a prototype in a few days, then spend a few more weeks polishing the edges.
+
