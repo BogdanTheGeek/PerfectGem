@@ -5,7 +5,6 @@ import {
    loadGCS,
    loadASC,
    loadGEM,
-   convertGCSTextToGEMBuffer,
    normalizeStoneToUnitSphere,
    computeMeshBoundsRadius,
    buildBVH,
@@ -17,7 +16,10 @@ import {
    stretchStoneByVertices,
    computeNormalFromPolar,
    generateFacesFromFacetList,
-   computeFacetNotesSummary
+   computeFacetNotesSummary,
+   buildDesignGcsText,
+   buildDesignAscText,
+   buildDesignGemBuffer,
 } from './loaders.js';
 import { exportInProgress, setupExporter } from './video.js';
 import { renderOrtho } from './ortho.js';
@@ -50,9 +52,6 @@ const toggleBtn = document.getElementById('gemui-toggle');
 const uiFileInput = document.getElementById('uiFileInput');
 const fileBtn = document.getElementById('fileBtn');
 const fileNameEl = document.getElementById('fileNameEl');
-const gcsConvertBtn = document.getElementById('gcsConvertBtn');
-const gcsConvertInput = document.getElementById('gcsConvertInput');
-const convertStatusEl = document.getElementById('convertStatus');
 
 // --- UI (built once; survives model swaps) ---
 let currentModelFilename = 'stone.gem';
@@ -432,10 +431,6 @@ function applyBodyBackground(ui) {
    document.body.style.backgroundColor = rgbToHex(ui.backgroundColor);
 }
 
-function setConvertStatus(message) {
-   if (convertStatusEl) convertStatusEl.textContent = message;
-}
-
 function setGemLibraryStatus(message) {
    if (gemLibraryStatusEl) gemLibraryStatusEl.textContent = message;
 }
@@ -664,33 +659,6 @@ function buildUI(ui, cbs) {
       fileNameEl.textContent = f.name;
       const url = URL.createObjectURL(f);
       cbs.onFileSelected?.(f.name, url);
-   });
-
-   gcsConvertBtn?.addEventListener('click', () => gcsConvertInput?.click());
-   gcsConvertInput?.addEventListener('change', async (ev) => {
-      const f = ev.target.files?.[0];
-      if (!f) return;
-      try {
-         setConvertStatus('Converting…');
-         const text = await f.text();
-         const gemBuffer = convertGCSTextToGEMBuffer(text);
-         const outName = f.name.replace(/\.gcs$/i, '.gem');
-         const blob = new Blob([gemBuffer], { type: 'application/octet-stream' });
-         const url = URL.createObjectURL(blob);
-         const anchor = document.createElement('a');
-         anchor.href = url;
-         anchor.download = outName;
-         document.body.appendChild(anchor);
-         anchor.click();
-         document.body.removeChild(anchor);
-         URL.revokeObjectURL(url);
-         setConvertStatus(`Saved ${outName}`);
-      } catch (err) {
-         console.error(err);
-         setConvertStatus('Convert failed');
-      } finally {
-         ev.target.value = '';
-      }
    });
 
    // --- Colour swatches ---
@@ -1474,227 +1442,6 @@ async function setupApp() {
       }, designFacets.length);
    }
 
-   function buildDesignGcsText(definition = {}) {
-      const gear = parseInt(definition.gear, 10);
-      const riValue = parseFloat(definition.refractiveIndex);
-      const refractiveIndex = Number.isFinite(riValue) && riValue > 1.0 ? riValue : 1.54;
-      const facets = Array.isArray(definition.facets) ? definition.facets : [];
-      const symmetry = Math.max(1, ...facets.map(f => Number.isFinite(Number(f.symmetry)) ? Number(f.symmetry) : 1));
-      const mirror = facets.some(f => f.mirror) ? 1 : 0;
-
-      const normalizeVec = (vector) => {
-         const len = Math.hypot(vector[0], vector[1], vector[2]);
-         if (!Number.isFinite(len) || len <= 1e-9) return [0, 0, 1];
-         return [vector[0] / len, vector[1] / len, vector[2] / len];
-      };
-
-      const fmt = (value) => {
-         const num = Number(value);
-         if (!Number.isFinite(num)) return '0';
-         // Use high precision string, then trim unnecessary trailing zeros
-         const s = num.toPrecision(17);
-         return s.replace(/\.?(?:0)+$/, '').replace(/\.$/, '');
-      };
-
-      const tierXml = [];
-      // Normalize input facets for tier metadata, and generate planar faces
-      const normalizedFacets = facets.map((f, i) => normalizeDesignFacet(f, i));
-      const faces = generateFacesFromFacetList(facets, gear);
-      // Group faces by source facet order to preserve original tier sequence.
-      const groups = new Map();
-      for (const face of faces) {
-         const sourceOrder = Number.isFinite(Number(face.sourceFacetOrder)) ? Number(face.sourceFacetOrder) : Number.MAX_SAFE_INTEGER;
-         const key = `${sourceOrder}\u0000${face.name}\u0000${face.instructions}`;
-         if (!groups.has(key)) {
-            groups.set(key, {
-               sourceOrder,
-               name: face.name || '',
-               instructions: face.instructions || '',
-               faces: [],
-            });
-         }
-         groups.get(key).faces.push(face);
-      }
-
-      // No geometric modifications here — rely on generateFacesFromFacetList output.
-
-      const orderedGroups = [...groups.values()].sort((a, b) => {
-         if (a.sourceOrder !== b.sourceOrder) return a.sourceOrder - b.sourceOrder;
-         const nameCmp = String(a.name).localeCompare(String(b.name));
-         if (nameCmp !== 0) return nameCmp;
-         return String(a.instructions).localeCompare(String(b.instructions));
-      });
-
-      for (const { sourceOrder, name, instructions, faces: grpFaces } of orderedGroups) {
-         // Sort faces in this tier by source gear index first, then index angle.
-         grpFaces.sort((a, b) => {
-            const ia = a.sourceGearIndex;
-            const ib = b.sourceGearIndex;
-            if (ia !== ib) return ia - ib;
-            const va = a.indexAngle ? a.indexAngle : a.azimuthDeg;
-            const vb = b.indexAngle ? b.indexAngle : b.azimuthDeg;
-            return va - vb;
-         });
-         // Match by source facet order first; fallback by labels for compatibility.
-         const source = normalizedFacets[sourceOrder]
-            || normalizedFacets.find(f => String((f.name || '')).trim() === String((name || '')).trim() && String((f.instructions || '')).trim() === String((instructions || '')).trim())
-            || null;
-         const angleAttr = source && source.angleDeg ? source.angleDeg : (grpFaces[0]?.signedAngleDeg ?? 0);
-         // depth fallback: normalized source distance or plane distance from first face
-         let depthAttr = source && source.distance ? source.distance : null;
-         if (!Number.isFinite(depthAttr) && grpFaces[0] && Array.isArray(grpFaces[0].vertices) && grpFaces[0].vertices.length) {
-            const n0 = grpFaces[0].normal || [0, 0, 1];
-            const v0 = grpFaces[0].vertices[0];
-            depthAttr = Math.abs((n0[0] * v0[0]) + (n0[1] * v0[1]) + (n0[2] * v0[2]));
-         }
-         const visibleAttr = source && typeof source.visible !== 'undefined' ? Boolean(source.visible) : true;
-         const guideAttr = source && typeof source.guide !== 'undefined' ? Boolean(source.guide) : false;
-
-         const facetXml = grpFaces.map((face) => {
-            const normal = normalizeVec(face.normal || [0, 0, 1]);
-            const vertices = Array.isArray(face.vertices) ? face.vertices.slice() : [];
-            if (vertices.length < 3) {
-               console.warn('buildDesignGcsText: skipping face with <3 vertices', name, instructions, face);
-               return '';
-            }
-            // ensure plane distance not near zero
-            const d0 = Math.abs(normal[0] * vertices[0][0] + normal[1] * vertices[0][1] + normal[2] * vertices[0][2]);
-            if (!Number.isFinite(d0) || d0 < 1e-9) {
-               console.warn('buildDesignGcsText: skipping face with near-zero plane distance', name, instructions, d0, face);
-               return '';
-            }
-            const vertsXml = vertices.map(v => `        <vertex x="${fmt(v[0])}" y="${fmt(v[1])}" z="${fmt(v[2])}"/>`).join('\n');
-            const outNormal = normalizeVec(face.normal || normal);
-            const rawIdxAngle = Number.isFinite(Number(face.indexAngle)) ? Number(face.indexAngle) : (Number.isFinite(Number(face.azimuthDeg)) ? Number(face.azimuthDeg) : 0);
-            const idxAngleStr = fmt(rawIdxAngle);
-            return `\n        <facet nx="${fmt(outNormal[0])}" ny="${fmt(outNormal[1])}" nz="${fmt(outNormal[2])}" index_angle="${idxAngleStr}">\n${vertsXml}\n        </facet>`;
-         }).join('');
-         if (facetXml) {
-            // Map signed angle (-90..+90) to 0..180 for GCS output
-            const angleForXml = (Number(angleAttr) < 0) ? (180 + Number(angleAttr)) : Number(angleAttr);
-            const angleStr = fmt(angleForXml);
-            const depthStr = fmt(depthAttr ?? 0);
-            tierXml.push(`    <tier angle="${angleStr}" depth="${depthStr}" name="${escapeHtml(name)}" instructions="${escapeHtml(instructions)}" visible="${visibleAttr ? 'true' : 'false'}" guide="${guideAttr ? 'true' : 'false'}">${facetXml}\n  </tier>`);
-         }
-      }
-
-      function escapeXML(str) {
-         return String(str)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/\n/g, '&#10;')
-            .replace(/'/g, '&apos;');
-      }
-
-      const result = `
-<GemCutStudio version="1000">\n
-   <index symmetry="${fmt(symmetry)}" mirror="${fmt(mirror)}" gear="${gear}"/>\n
-   <render refractive_index="${fmt(refractiveIndex)}"/>\
-   n${tierXml.join('\n')}\n
-   <info title="${escapeXML(definition.metadata?.title || '')}" footer1="${escapeXML(definition.metadata?.comments || '')}"/>\n
-</GemCutStudio>\n`;
-      return result;
-   }
-
-   function buildDesignAscText(definition = {}) {
-      const gear = Math.max(1, parseInt(definition.gear, 10) || 96);
-      const riValue = parseFloat(definition.refractiveIndex);
-      const refractiveIndex = Number.isFinite(riValue) && riValue > 1.0 ? riValue : 1.54;
-      const facets = Array.isArray(definition.facets) ? definition.facets : [];
-      const normalizedFacets = facets.map((f, i) => normalizeDesignFacet(f, i));
-
-      const fmt = (value, digits = 6) => {
-         const num = Number(value);
-         if (!Number.isFinite(num)) return '0';
-         return num.toFixed(digits).replace(/\.?0+$/, '');
-      };
-
-      const normalizeAscIndex = (value) => {
-         const raw = parseInt(value, 10);
-         if (!Number.isFinite(raw)) return null;
-         let idx = raw % gear;
-         if (idx < 0) idx += gear;
-         if (idx === 0) idx = gear;
-         return idx;
-      };
-
-      const mirrorAscIndex = (index) => {
-         const idx = normalizeAscIndex(index);
-         if (!Number.isFinite(idx)) return null;
-         if (idx === gear) return gear;
-         return normalizeAscIndex(gear - idx);
-      };
-
-      const titleLines = String(definition.metadata?.title || '')
-         .split(/\r?\n/)
-         .map((line) => line.trim())
-         .filter((line) => line.length > 0);
-      const commentLines = String(definition.metadata?.comments || '')
-         .split(/\r?\n/)
-         .map((line) => line.trim())
-         .filter((line) => line.length > 0);
-
-      const lines = [];
-      lines.push('GemCad 5.0');
-      lines.push(`g ${gear} 0`);
-      lines.push(`I ${fmt(refractiveIndex, 6)}`);
-
-      for (const line of titleLines) {
-         lines.push(`H ${line}`);
-      }
-      for (const line of commentLines) {
-         lines.push(`F ${line}`);
-      }
-
-      normalizedFacets.forEach((facet, idx) => {
-         const symmetry = Math.max(1, Math.min(gear, parseInt(facet.symmetry, 10) || 1));
-         const mirror = Boolean(facet.mirror);
-         const step = gear / symmetry;
-         const indexSet = new Set();
-
-         const explicitIndexes = Array.isArray(facet.indexes)
-            ? [...new Set(
-               facet.indexes
-                  .map((value) => normalizeAscIndex(value))
-                  .filter((value) => Number.isFinite(value)),
-            )]
-            : [];
-
-         if (explicitIndexes.length > 0) {
-            explicitIndexes.forEach((value) => indexSet.add(value));
-         } else {
-            const start = normalizeAscIndex(facet.startIndex) || 1;
-            for (let i = 0; i < symmetry; i++) {
-               const offset = Math.round(i * step);
-               const primary = normalizeAscIndex(start + offset);
-               if (!Number.isFinite(primary)) continue;
-               indexSet.add(primary);
-               if (mirror) {
-                  const mirrored = mirrorAscIndex(primary);
-                  if (Number.isFinite(mirrored)) indexSet.add(mirrored);
-               }
-            }
-         }
-
-         let indexes = [...indexSet].sort((a, b) => a - b);
-         if (!indexes.length) indexes = [1];
-
-         const angleDeg = Number.isFinite(Number(facet.angleDeg)) ? Number(facet.angleDeg) : 0;
-         const rawDistance = Number.isFinite(Number(facet.distance)) ? Number(facet.distance) : 1;
-         const rho = Math.abs(rawDistance);
-         const safeName = String(facet.name || `F${idx + 1}`).trim() || `F${idx + 1}`;
-         const safeInstructions = String(facet.instructions || '').replace(/\r?\n/g, ' ').trim();
-
-         let row = `a ${fmt(angleDeg, 6)} ${fmt(rho, 6)} ${indexes.join(' ')} n ${safeName}`;
-         if (safeInstructions) row += ` G ${safeInstructions}`;
-         lines.push(row);
-      });
-
-      return `${lines.join('\n')}\n`;
-   }
-
    function scheduleDesignApply(geometryChanged = true) {
       pendingDesignApplyGeometryChanged = pendingDesignApplyGeometryChanged || Boolean(geometryChanged);
       if (designApplyTimer) {
@@ -2412,7 +2159,7 @@ async function setupApp() {
             const gcsText = buildDesignGcsText(exportDefinition);
             blob = new Blob([gcsText], { type: 'application/xml' });
          } else {
-            const gemBuffer = convertGCSTextToGEMBuffer(buildDesignGcsText(exportDefinition));
+            const gemBuffer = buildDesignGemBuffer(exportDefinition);
             outName = `${baseName}.gem`;
             blob = new Blob([gemBuffer], { type: 'application/octet-stream' });
          }
@@ -2455,7 +2202,7 @@ async function setupApp() {
             content = buildDesignGcsText(exportDefinition);
          }
          else if (extension === 'gem') {
-            content = convertGCSTextToGEMBuffer(buildDesignGcsText(exportDefinition));
+            content = buildDesignGemBuffer(exportDefinition);
          } else if (extension === 'asc') {
             content = buildDesignAscText(exportDefinition);
          } else {

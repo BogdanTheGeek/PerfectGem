@@ -141,8 +141,7 @@
             background: #7eb8f7;
             transition: width .12s linear;
         }
-        #fileNameEl,
-        #convertStatus { margin-top: 6px; font-size: 11px; color: #aaa; }
+        #fileNameEl { margin-top: 6px; font-size: 11px; color: #aaa; }
 
         /* ── Side panels (graph + facets) ───────────────────────────── */
         /* position:relative establishes the containing block for the
@@ -928,16 +927,6 @@
                             </div>
                         </div>
                     </div>
-            <hr class="divider">
-            <div class="row">
-                <label>Convert</label>
-                <div class="modes">
-                    <div class="mode" id="gcsConvertBtn" style="flex:1;cursor:pointer;">Convert .gcs to .gem</div>
-                </div>
-                <div id="convertStatus"></div>
-                <input type="file" id="gcsConvertInput" accept=".gcs,.GCS" style="display:none">
-            </div>
-
                     <div id="designResize" aria-hidden="true"></div>
                 </div>
             </div>
