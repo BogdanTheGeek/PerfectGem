@@ -21,6 +21,10 @@ import {
    buildDesignAscText,
    buildDesignGemBuffer,
 } from './loaders.js';
+import {
+   computeFacetNormalFromParams,
+   computeSignedFacetAngleDeg,
+} from './geometry.js';
 import { exportInProgress, setupExporter } from './video.js';
 import { renderOrtho } from './ortho.js';
 
@@ -1442,6 +1446,21 @@ async function setupApp() {
       }, designFacets.length);
    }
 
+   function autofillCreateFacetDistanceFromSelectedVertex() {
+      const selectedVertexId = getSingleSelectedVertexId();
+      if (selectedVertexId == null) return false;
+      const inputFacet = readCreateFacetFromInputs();
+      const pivoted = buildFacetWithDistanceFromVertex(inputFacet, designFacets.length, selectedVertexId);
+      if (!pivoted?.facet || !Number.isFinite(Number(pivoted.facet.distance))) return false;
+
+      const planeDist = Math.abs(Number(pivoted.facet.distance));
+      const keepNegativeFlat = Math.abs(Number(inputFacet.angleDeg) || 0) <= 1e-8 && Number(inputFacet.distance) < 0;
+      const signedDistance = keepNegativeFlat ? -planeDist : planeDist;
+      designDistanceEl.value = signedDistance.toFixed(5);
+      requestRender();
+      return true;
+   }
+
    function scheduleDesignApply(geometryChanged = true) {
       pendingDesignApplyGeometryChanged = pendingDesignApplyGeometryChanged || Boolean(geometryChanged);
       if (designApplyTimer) {
@@ -2222,7 +2241,21 @@ async function setupApp() {
    });
 
    designGearEl.addEventListener('input', () => {
+      autofillCreateFacetDistanceFromSelectedVertex();
       scheduleDesignApply();
+   });
+
+   designAngleEl.addEventListener('input', () => {
+      autofillCreateFacetDistanceFromSelectedVertex();
+   });
+   designStartIndexEl.addEventListener('input', () => {
+      autofillCreateFacetDistanceFromSelectedVertex();
+   });
+   designSymmetryEl.addEventListener('input', () => {
+      autofillCreateFacetDistanceFromSelectedVertex();
+   });
+   designMirrorEl.addEventListener('change', () => {
+      autofillCreateFacetDistanceFromSelectedVertex();
    });
 
    designClearBtn.addEventListener('click', () => {
@@ -2260,7 +2293,7 @@ async function setupApp() {
          nextFacet.indexDistances = undefined;
       }
       let nextNormalizedFacet = normalizeDesignFacet(nextFacet, facetIdx);
-      if (field === 'angleDeg') {
+      if (field === 'angleDeg' || field === 'startIndex' || field === 'symmetry' || field === 'mirror') {
          const selectedVertexId = getSingleSelectedVertexId();
          if (selectedVertexId != null && doesVertexBelongToFacetRow(selectedVertexId, facetIdx)) {
             const pivoted = buildFacetWithDistanceFromVertex(nextNormalizedFacet, facetIdx, selectedVertexId);
@@ -3173,40 +3206,6 @@ async function setupApp() {
       }
    }
 
-   function computeSignedFacetAngleLikeLoader(normal) {
-      const nz = Math.max(-1, Math.min(1, Math.abs(normal[2])));
-      const absAngle = Math.acos(nz) * 180 / Math.PI;
-      return normal[2] >= 0 ? absAngle : -absAngle;
-   }
-
-   function computeFacetNormalFromParams(gearValue, rawIndexValue, angleValue, distanceValue) {
-      const gear = Math.max(1, parseInt(gearValue, 10) || 96);
-      const rawIndex = parseFloat(rawIndexValue) || 0;
-      const angleDeg = Math.max(-90, Math.min(90, parseFloat(angleValue) || 0));
-      const distance = parseFloat(distanceValue);
-
-      const isNegativeZero = (value) => value === 0 && 1 / value === -Infinity;
-      const resolveFlatNormalZ = (angle, depth) => {
-         if (Number.isFinite(depth) && depth < 0) return -1;
-         if (angle < 0 || isNegativeZero(angle)) return -1;
-         return 1;
-      };
-
-      if (Math.abs(angleDeg) <= 1e-8) {
-         return [0, 0, resolveFlatNormalZ(angleDeg, distance)];
-      }
-
-      const incl = angleDeg * Math.PI / 180;
-      const azi = ((rawIndex % gear) / gear) * Math.PI * 2;
-      let c = Math.cos(incl);
-      let s = Math.sin(incl);
-      if (angleDeg < 0) {
-         c *= -1;
-         s *= -1;
-      }
-      return normalize3([s * Math.sin(azi), -s * Math.cos(azi), c]);
-   }
-
    function computeFacetNormalFromDesignInputs() {
       const gear = Math.max(1, parseInt(designGearEl.value, 10) || 96);
       const rawIndex = parseFloat(designStartIndexEl.value) || 0;
@@ -3652,7 +3651,7 @@ async function setupApp() {
          const gear = Math.max(1, parseInt(designGearEl.value, 10) || 96);
          const currentIndex = parseFloat(designStartIndexEl.value) || 0;
          const inferredIndex = computeDesignIndexFromNormal(planeNormal, gear, currentIndex);
-         const tierAngle = computeSignedFacetAngleLikeLoader(planeNormal);
+         const tierAngle = computeSignedFacetAngleDeg(planeNormal);
          const planeDist = Math.abs(dot3(planeNormal, midpoint));
 
          designAngleEl.value = Math.max(-90, Math.min(90, tierAngle)).toFixed(3);
@@ -3702,7 +3701,7 @@ async function setupApp() {
          const midB = scale3(add3(b0, b1), 0.5);
          const refPoint = scale3(add3(midA, midB), 0.5);
          const planeDist = Math.abs(dot3(planeNormal, refPoint));
-         const tierAngle = computeSignedFacetAngleLikeLoader(planeNormal);
+         const tierAngle = computeSignedFacetAngleDeg(planeNormal);
 
          designAngleEl.value = Math.max(-90, Math.min(90, tierAngle)).toFixed(3);
          designDistanceEl.value = Math.max(0, planeDist).toFixed(5);
