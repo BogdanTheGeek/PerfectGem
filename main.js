@@ -5140,9 +5140,8 @@ async function setupApp() {
          }
 
          if (tabName === 'cuts') {
-            if (!cutsSequence.length) {
-               setCutsSequenceFromStone(cutsSourceStone || currentStone);
-            }
+            // Always rebuild from the current stone so Cuts reflects the latest design/model.
+            setCutsSequenceFromStone(currentStone);
             updateCutsReadout();
             queueCutsNavigation('index', 0);
             requestRender();
@@ -5159,7 +5158,7 @@ async function setupApp() {
       },
       onCutsNavigate(kind, direction) {
          if (!cutsSequence.length) {
-            setCutsSequenceFromStone(cutsSourceStone || currentStone);
+            setCutsSequenceFromStone(currentStone);
          }
          if (!cutsSequence.length) {
             updateCutsReadout();
