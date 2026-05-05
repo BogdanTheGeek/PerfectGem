@@ -498,7 +498,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var N_world = normalize(input.worldNormal);
     let graph = uniforms.graphMode > 0.5;
 
-    let stoneColor = select(vec3<f32>(1.0), uniforms.stoneColor, !graph);
+    // Wider overlap for gentler material transition.
+    let splitMix = smoothstep(-0.20, 0.20, input.localPos.x);
+    let leftMaterialColor = vec3<f32>(0.60, 0.24, 0.86);
+    let rightMaterialColor = vec3<f32>(1.00, 0.68, 0.20);
+    let materialStoneColor = mix(leftMaterialColor, rightMaterialColor, splitMix);
+    let stoneColor = select(vec3<f32>(1.0), materialStoneColor, !graph);
 
     let isFrontFace = dot(V_world, N_world) < 0.0;
     if (!isFrontFace) { N_world = -N_world; }
@@ -569,7 +574,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(aces_tonemap_fast(frostColor), 0.98);
     }
 
-    let ri      = cauchy_ri3(uniforms.ri_d, uniforms.cod); // vec3(ri_r, ri_g, ri_b)
+    let riLeft  = cauchy_ri3(uniforms.ri_d + 0.08, uniforms.cod);
+    let riRight = cauchy_ri3(max(1.01, uniforms.ri_d - 0.08), uniforms.cod);
+    let ri      = mix(riLeft, riRight, splitMix); // vec3(ri_r, ri_g, ri_b)
     let ri_r    = ri.x;
     let ri_g    = ri.y;
     let ri_b    = ri.z;
