@@ -187,7 +187,7 @@ fn sample_env_view(dirView: vec3<f32>) -> vec3<f32> {
         !graph && mode > 2.5,
     );
 
-    return tint * envLight + tableAmbient;
+    return envLight + tableAmbient;
 }
 
 fn sample_env(dirWorld: vec3<f32>) -> vec3<f32> {
@@ -381,7 +381,8 @@ fn intersect_convex_facets(ro: vec3<f32>, rd: vec3<f32>) -> HitResult {
 struct TraceResult {
     light: vec3<f32>,
     window: vec3<f32>,
-    dist: f32
+    dist: f32,
+    zoneDist: vec2<f32>
 };
 
 // Merged 3-channel trace: one BVH traversal per bounce shared across R/G/B.
@@ -400,6 +401,7 @@ fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
     var throughput  = vec3<f32>(1.0);
     var windowLeak  = vec3<f32>(0.0);
     var totalDist   = 0.0; // Track cumulative distance
+    var zoneDist    = vec2<f32>(0.0); // x = purple(left), y = amber(right)
 
     for (var bounce = 0; bounce < 10; bounce++) {
         // Single BVH traversal using the green (middle) navigator ray
@@ -422,6 +424,27 @@ fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
             accumulated += throughput * envSample;
             break;
         }
+
+        // Split this segment distance between purple/amber zones.
+        let segEnd = origin + g * hit.t;
+        let coord0 = origin.x + origin.z * 0.30;
+        let coord1 = segEnd.x + segEnd.z * 0.30;
+        var leftFrac = 0.0;
+        if (coord0 * coord1 < 0.0) {
+            let denom = max(1e-5, abs(coord0) + abs(coord1));
+            leftFrac = select(abs(coord1) / denom, abs(coord0) / denom, coord0 < 0.0);
+        } else {
+            leftFrac = select(0.0, 1.0, coord0 < 0.0);
+        }
+        zoneDist.x += hit.t * leftFrac;
+        zoneDist.y += hit.t * (1.0 - leftFrac);
+
+        // Mild travel absorption per segment to calm overly strong bounce loops.
+        let leftTravelAbsorb = vec3<f32>(0.20, 0.40, 0.10);
+        let rightTravelAbsorb = vec3<f32>(0.10, 0.20, 0.40);
+        let segmentAbsorb = leftTravelAbsorb * leftFrac + rightTravelAbsorb * (1.0 - leftFrac);
+        let travelStrength = (1.0 - uniforms.clarity) * 0.60 + 0.07;
+        let travelAttenuation = exp(-(segmentAbsorb * travelStrength) * hit.t);
 
         // Add the distance traveled in this segment to the total
         totalDist += hit.t;
@@ -478,7 +501,7 @@ fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
         r           = refl_r;
         g           = refl_g;
         b           = refl_b;
-        throughput *= fresnel;
+        throughput *= fresnel * travelAttenuation;
         if (all(throughput < vec3<f32>(0.001))) { break; }
     }
 
@@ -486,6 +509,7 @@ fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
     result.light  = accumulated;
     result.window = clamp(windowLeak, vec3<f32>(0.0), vec3<f32>(1.0));
     result.dist   = totalDist;
+    result.zoneDist = zoneDist;
     return result;
 }
 
@@ -574,9 +598,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(aces_tonemap_fast(frostColor), 0.98);
     }
 
-    let riLeft  = cauchy_ri3(uniforms.ri_d + 0.08, uniforms.cod);
-    let riRight = cauchy_ri3(max(1.01, uniforms.ri_d - 0.08), uniforms.cod);
-    let ri      = mix(riLeft, riRight, splitMix); // vec3(ri_r, ri_g, ri_b)
+    // Keep optical behavior stable per path: single RI avoids facet-to-facet
+    // amber/purple flip patterns from side-dependent RI switching.
+    let ri      = cauchy_ri3(uniforms.ri_d, uniforms.cod); // vec3(ri_r, ri_g, ri_b)
     let ri_r    = ri.x;
     let ri_g    = ri.y;
     let ri_b    = ri.z;
@@ -600,14 +624,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let tr    = trace_internal(refr_rd_r, refr_rd_g, refr_rd_b, entry, ri, mvMatrix, modelNZ);
 
     let clarity = uniforms.clarity;
-    // Beer-Lambert: Clarity 1.0 = clear, 0.0 = opaque/dark
-    let absorptionFactor = (1.0 - clarity) * 1.0;
-    let transmission = exp(-absorptionFactor * tr.dist);
+    // Path-based color mixing: distance traveled in each half drives absorption.
+    let leftAbsorption = vec3<f32>(0.92, 1.95, 0.15);
+    let rightAbsorption = vec3<f32>(0.18, 0.40, 1.72);
+    let absorptionStrength = (1.0 - clarity) * 1.28 + 0.16;
+    let transmission = exp(-(leftAbsorption * absorptionStrength) * tr.zoneDist.x)
+                     * exp(-(rightAbsorption * absorptionStrength) * tr.zoneDist.y);
 
 
     // Apply to the internal light and window leakage
-    let finalInternalLight = tr.light * transmission * stoneColor;
-    let baseColor = reflection + finalInternalLight * (1.0 - fresnel);
+    let finalInternalLight = tr.light * transmission ;
+    let reflectionTransmission = mix(1.0, dot(transmission, vec3<f32>(0.3333, 0.3333, 0.3333)), 0.35);
+    let baseColor = reflection * reflectionTransmission + finalInternalLight * (1.0 - fresnel);
 
     // Dedicated graph mode: emit raw pre-tonemap luminance directly.
     // This avoids ACES tonemapping, 8-bit quantization bias, and the
