@@ -218,6 +218,15 @@ const facetResizeEl = document.getElementById('facetInfoResize');
 const facetResizeRightEl = document.getElementById('facetInfoResizeRight');
 const designHeaderEl = document.getElementById('designHeader');
 const designFooterEl = document.getElementById('designFooter');
+const designSizeDriverTypeEl = document.getElementById('designSizeDriverType');
+const designSizeDriverValueEl = document.getElementById('designSizeDriverValue');
+const designSizeWEl = document.getElementById('designSizeW');
+const designSizeLEl = document.getElementById('designSizeL');
+const designSizePEl = document.getElementById('designSizeP');
+const designSizeCEl = document.getElementById('designSizeC');
+const designSizeUEl = document.getElementById('designSizeU');
+const designSizeTEl = document.getElementById('designSizeT');
+const designSizeCalcStatusEl = document.getElementById('designSizeCalcStatus');
 let graphCanvasWidth = 388;
 let graphCanvasHeight = 220;
 let latestGraphSeries = null;
@@ -233,6 +242,7 @@ let designNumberScrubDragDepth = 0;
 let designFacetReorderSuppressClickUntil = 0;
 const DESIGN_HISTORY_LIMIT = 120;
 let modelHasTableFacet = false;
+let designSizeOverlayWidthMm = null;
 const GEM_LIBRARY_ORIGIN = 'https://bogdanthegeek.github.io';
 const GEM_LIBRARY_OPEN_MODEL_EVENT = 'gemlibrary:open-model';
 let gemLibraryBridgeInstalled = false;
@@ -1292,6 +1302,78 @@ async function setupApp() {
       designStatusEl.textContent = text;
    }
 
+   function setDesignSizeValue(el, value, digits = 3) {
+      if (!el) return;
+      el.value = Number.isFinite(value) ? value.toFixed(digits) : '';
+   }
+
+   function clearDesignSizeCalculatorOutputs() {
+      setDesignSizeValue(designSizeWEl, NaN);
+      setDesignSizeValue(designSizeLEl, NaN);
+      setDesignSizeValue(designSizePEl, NaN);
+      setDesignSizeValue(designSizeCEl, NaN);
+      setDesignSizeValue(designSizeUEl, NaN);
+      setDesignSizeValue(designSizeTEl, NaN);
+      designSizeOverlayWidthMm = null;
+   }
+
+   function setDesignSizeCalculatorStatus(text) {
+      if (!designSizeCalcStatusEl) return;
+      designSizeCalcStatusEl.textContent = text;
+   }
+
+   function computeDesignSizeCalculatorResult() {
+      if (!currentStone) return { ok: false, message: 'Load stone to compute dimensions.' };
+      const summary = computeFacetNotesSummary(currentStone);
+      if (!summary || !Number.isFinite(summary.lw) || summary.lw <= 0) {
+         return { ok: false, message: 'Dimensions unavailable for current stone.' };
+      }
+
+      const driverType = (designSizeDriverTypeEl?.value === 'L') ? 'L' : 'W';
+      const driverValue = parseFloat(designSizeDriverValueEl?.value ?? '');
+      if (!Number.isFinite(driverValue) || driverValue <= 0) {
+         return { ok: false, message: 'Enter positive W or L value in mm.' };
+      }
+
+      const widthMm = driverType === 'L'
+         ? driverValue / summary.lw
+         : driverValue;
+      if (!Number.isFinite(widthMm) || widthMm <= 0) {
+         return { ok: false, message: 'Unable to solve width from input.' };
+      }
+
+      return {
+         ok: true,
+         driverType,
+         driverValue,
+         widthMm,
+         lengthMm: summary.lw * widthMm,
+         pavilionMm: summary.pw * widthMm,
+         crownMm: summary.cw * widthMm,
+         upperMm: summary.uw * widthMm,
+         tableMm: summary.tw * widthMm,
+      };
+   }
+
+   function refreshDesignSizeCalculator() {
+      if (!designSizeDriverTypeEl || !designSizeDriverValueEl) return;
+      const result = computeDesignSizeCalculatorResult();
+      if (!result.ok) {
+         clearDesignSizeCalculatorOutputs();
+         setDesignSizeCalculatorStatus(result.message);
+         return;
+      }
+
+      setDesignSizeValue(designSizeWEl, result.widthMm);
+      setDesignSizeValue(designSizeLEl, result.lengthMm);
+      setDesignSizeValue(designSizePEl, result.pavilionMm);
+      setDesignSizeValue(designSizeCEl, result.crownMm);
+      setDesignSizeValue(designSizeUEl, result.upperMm);
+      setDesignSizeValue(designSizeTEl, result.tableMm);
+      designSizeOverlayWidthMm = result.widthMm;
+      setDesignSizeCalculatorStatus(`Solved from ${result.driverType} = ${result.driverValue.toFixed(3)} mm`);
+   }
+
    function updateDesignStatusSummary() {
       if (!designFacets.length) {
          setDesignStatus('No custom facets yet.');
@@ -1594,7 +1676,7 @@ async function setupApp() {
 
       renderFacetInfo(currentStone);
       setFacetStatus(`${currentStone.facets.length} generated facets from design`);
-   syncCutsSequenceFromDesignFacets();
+      syncCutsSequenceFromDesignFacets();
       requestRender();
       return true;
    }
@@ -1642,7 +1724,7 @@ async function setupApp() {
 
       designFacets = grouped.map((facet, idx) => normalizeDesignFacet(facet, idx));
       renderDesignFacetList();
-   if (resetHistory) resetDesignHistory();
+      if (resetHistory) resetDesignHistory();
    }
 
    function installNumberDragScrub(rootEl) {
@@ -3723,7 +3805,10 @@ async function setupApp() {
       const percent = Number.isFinite(stoneWidth) && stoneWidth > 0
          ? (length / stoneWidth) * 100
          : null;
-      return { length, percent };
+      const lengthMm = Number.isFinite(designSizeOverlayWidthMm) && Number.isFinite(stoneWidth) && stoneWidth > 0
+         ? (length / stoneWidth) * designSizeOverlayWidthMm
+         : null;
+      return { length, percent, lengthMm };
    }
 
    function buildSelectionMetric() {
@@ -3740,18 +3825,17 @@ async function setupApp() {
          const edgeMetric = edgeLengthAndPercent(edge, stoneWidth);
          if (!edgeMetric) return result;
          result.title = 'Edge';
-         if (Number.isFinite(edgeMetric.percent)) {
-            result.details = `Length ${edgeMetric.length.toFixed(5)} (${edgeMetric.percent.toFixed(2)}% width)`;
+         if (Number.isFinite(edgeMetric.lengthMm)) {
+            result.details = `Length ${edgeMetric.lengthMm.toFixed(3)} mm`;
             result.lines = [
                'Edge',
-               `Length: ${edgeMetric.length.toFixed(5)}`,
-               `Width: ${edgeMetric.percent.toFixed(2)}%`,
+               `Length: ${edgeMetric.lengthMm.toFixed(3)} mm`,
             ];
          } else {
-            result.details = `Length ${edgeMetric.length.toFixed(5)}`;
+            result.details = `Length ${edgeMetric.length.toFixed(5)} (mm n/a)`;
             result.lines = [
                'Edge',
-               `Length: ${edgeMetric.length.toFixed(5)}`,
+               `Length: ${edgeMetric.length.toFixed(5)} (mm n/a)`,
             ];
          }
          return result;
@@ -3828,15 +3912,15 @@ async function setupApp() {
          designDistanceEl.value = Math.max(0, planeDist).toFixed(5);
 
          const edgeLength = len3(sub3(v1, v0));
-         const edgePct = Number.isFinite(stoneWidth) && stoneWidth > 0
-            ? (edgeLength / stoneWidth) * 100
+         const edgeMm = Number.isFinite(designSizeOverlayWidthMm) && Number.isFinite(stoneWidth) && stoneWidth > 0
+            ? (edgeLength / stoneWidth) * designSizeOverlayWidthMm
             : null;
 
          result.title = '2 Vertices';
-         if (Number.isFinite(edgePct)) {
-            result.details = `Span ${edgeLength.toFixed(5)} (${edgePct.toFixed(2)}% width), index ${inferredIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
+         if (Number.isFinite(edgeMm)) {
+            result.details = `Span ${edgeMm.toFixed(3)} mm, index ${inferredIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
          } else {
-            result.details = `Span ${edgeLength.toFixed(5)}, index ${inferredIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
+            result.details = `Span ${edgeLength.toFixed(5)} (mm n/a), index ${inferredIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
          }
          return result;
       }
@@ -3926,10 +4010,10 @@ async function setupApp() {
          designDistanceEl.value = Math.max(0, planeDist).toFixed(5);
 
          result.title = '2 Edges';
-         const lengthsText = (edgeAMetric && edgeBMetric && Number.isFinite(edgeAMetric.percent) && Number.isFinite(edgeBMetric.percent))
-            ? `e1 ${edgeAMetric.percent.toFixed(2)}%, e2 ${edgeBMetric.percent.toFixed(2)}% width`
+         const lengthsText = (edgeAMetric && edgeBMetric && Number.isFinite(edgeAMetric.lengthMm) && Number.isFinite(edgeBMetric.lengthMm))
+            ? `e1 ${edgeAMetric.lengthMm.toFixed(3)} mm, e2 ${edgeBMetric.lengthMm.toFixed(3)} mm`
             : (edgeAMetric && edgeBMetric
-               ? `e1 ${edgeAMetric.length.toFixed(5)}, e2 ${edgeBMetric.length.toFixed(5)}`
+               ? `e1 ${edgeAMetric.length.toFixed(5)} (mm n/a), e2 ${edgeBMetric.length.toFixed(5)} (mm n/a)`
                : '');
          const lengthsPrefix = lengthsText ? `${lengthsText}; ` : '';
          result.details = `${lengthsPrefix}Proj angle ${projectedEdgeAngleDeg.toFixed(2)}°, tier ${tierAngle.toFixed(3)}°, dist ${planeDist.toFixed(5)} (autofill)`;
@@ -3948,14 +4032,14 @@ async function setupApp() {
          const avgLen = lengths.reduce((sum, value) => sum + value, 0) / lengths.length;
 
          result.title = `${edgeMetrics.length} Edges`;
-         if (edgeMetrics.every((m) => Number.isFinite(m.percent))) {
-            const percents = edgeMetrics.map((m) => m.percent);
-            const minPct = Math.min(...percents);
-            const maxPct = Math.max(...percents);
-            const avgPct = percents.reduce((sum, value) => sum + value, 0) / percents.length;
-            result.details = `Avg ${avgPct.toFixed(2)}% width (min ${minPct.toFixed(2)}%, max ${maxPct.toFixed(2)}%)`;
+         if (edgeMetrics.every((m) => Number.isFinite(m.lengthMm))) {
+            const mmLengths = edgeMetrics.map((m) => m.lengthMm);
+            const minMm = Math.min(...mmLengths);
+            const maxMm = Math.max(...mmLengths);
+            const avgMm = mmLengths.reduce((sum, value) => sum + value, 0) / mmLengths.length;
+            result.details = `Avg ${avgMm.toFixed(3)} mm (min ${minMm.toFixed(3)} mm, max ${maxMm.toFixed(3)} mm)`;
          } else {
-            result.details = `Avg ${avgLen.toFixed(5)} (min ${minLen.toFixed(5)}, max ${maxLen.toFixed(5)})`;
+            result.details = `Avg ${avgLen.toFixed(5)} (mm n/a; min ${minLen.toFixed(5)}, max ${maxLen.toFixed(5)})`;
          }
          return result;
       }
@@ -4222,7 +4306,7 @@ async function setupApp() {
          }
       }
 
-         if (!isDesignTab) return;
+      if (!isDesignTab) return;
 
       for (const vertexId of designSelection.vertexIds) drawVertex(vertexId, 6);
       for (const edgeId of designSelection.edgeIds) drawEdge(edgeId, 3);
@@ -4912,6 +4996,8 @@ async function setupApp() {
          rebindSelectionToVertexPosition(selectedVertexPosition);
       }
 
+      refreshDesignSizeCalculator();
+
       scheduleGraphUpdate('model load');
       resize();
       requestRender();
@@ -4977,6 +5063,10 @@ async function setupApp() {
    const designPavilionRatio = document.getElementById('designPavilionRatio');
    const designApplyScaleBtn = document.getElementById('designApplyScaleBtn');
    const designResetScaleBtn = document.getElementById('designResetScaleBtn');
+
+   designSizeDriverTypeEl?.addEventListener('change', refreshDesignSizeCalculator);
+   designSizeDriverValueEl?.addEventListener('input', refreshDesignSizeCalculator);
+   refreshDesignSizeCalculator();
 
    let suspendScaleAdjust = false;
    let pendingCrown = false;

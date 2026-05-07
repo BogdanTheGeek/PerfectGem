@@ -353,6 +353,37 @@
             user-select: none;
         }
         .designBtn:hover { border-color: rgba(255,255,255,.28); color: #fff; }
+        .designSubsection {
+            margin: 0 0 10px;
+            padding: 8px;
+            border: 1px solid rgba(255,255,255,.12);
+            border-radius: 8px;
+            background: rgba(255,255,255,.03);
+        }
+        .designSubsectionTitle {
+            margin: 0 0 8px;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: .05em;
+            text-transform: uppercase;
+            color: #dce6f5;
+        }
+        .designUnitReadout {
+            width: 100%;
+            box-sizing: border-box;
+            background: #12121a;
+            color: #c8d0de;
+            border: 1px solid rgba(255,255,255,.12);
+            border-radius: 6px;
+            padding: 4px 6px;
+            font-size: 12px;
+            line-height: 1.45;
+        }
+        .designCalcStatus {
+            margin-top: 4px;
+            font-size: 11px;
+            color: #9aa4b4;
+        }
         .designFacetTable {
             width: 100%;
             table-layout: fixed;
@@ -948,6 +979,56 @@
                             <div class="designBtn" id="designUnitSphereBtn">Rescale Unit Sphere</div>
                         </div>
                     </div>
+                    <hr class="divider">
+                        <div class="designSubsection">
+                            <div class="designSubsectionTitle">Stone Size Calculator</div>
+                            <div class="designGrid3">
+                                <div class="designRow">
+                                    <label>Driver</label>
+                                    <select id="designSizeDriverType">
+                                        <option value="W" selected>W</option>
+                                        <option value="L">L</option>
+                                    </select>
+                                </div>
+                                <div class="designRow">
+                                    <label>Value</label>
+                                    <input type="number" id="designSizeDriverValue" min="0" step="0.001" placeholder="10.000">
+                                </div>
+                                <div class="designRow">
+                                    <label>Unit</label>
+                                    <div class="designUnitReadout">mm</div>
+                                </div>
+                            </div>
+                            <div class="designGrid3">
+                                <div class="designRow">
+                                    <label>W (mm)</label>
+                                    <input type="text" id="designSizeW" readonly>
+                                </div>
+                                <div class="designRow">
+                                    <label>L (mm)</label>
+                                    <input type="text" id="designSizeL" readonly>
+                                </div>
+                                <div class="designRow">
+                                    <label>P (mm)</label>
+                                    <input type="text" id="designSizeP" readonly>
+                                </div>
+                            </div>
+                            <div class="designGrid3">
+                                <div class="designRow">
+                                    <label>C (mm)</label>
+                                    <input type="text" id="designSizeC" readonly>
+                                </div>
+                                <div class="designRow">
+                                    <label>U (mm)</label>
+                                    <input type="text" id="designSizeU" readonly>
+                                </div>
+                                <div class="designRow">
+                                    <label>T (mm)</label>
+                                    <input type="text" id="designSizeT" readonly>
+                                </div>
+                            </div>
+                            <div id="designSizeCalcStatus" class="designCalcStatus">Enter W or L value in mm.</div>
+                        </div>
                     <div id="designResize" aria-hidden="true"></div>
                 </div>
             </div>
