@@ -7,6 +7,7 @@ import {
    computeNormalFromPolar as geometryComputeNormalFromPolar,
    computeSignedFacetAngleDeg as geometryComputeSignedFacetAngleDeg,
    stretchStoneByVertices as geometryStretchStoneByVertices,
+   stretchStoneByLW as geometryStretchStoneByLW,
 } from './geometry.js';
 
 let XMLParser = null;
@@ -720,6 +721,14 @@ function stretchStoneByVertices(stone, scaleFactor, crown = true) {
    return geometryStretchStoneByVertices(stone, scaleFactor, crown, {
       isGirdleFacet,
       rebuildFromPlanes: (planes, refractiveIndex, sourceGear) => buildStoneFromHalfSpacePlanes(planes, refractiveIndex, sourceGear),
+   });
+}
+
+function stretchStoneByLW(stone, lwRatio, options = {}) {
+   return geometryStretchStoneByLW(stone, lwRatio, {
+      isGirdleFacet,
+      rebuildFromPlanes: (planes, refractiveIndex, sourceGear) => buildStoneFromHalfSpacePlanes(planes, refractiveIndex, sourceGear),
+      ...options,
    });
 }
 
@@ -2453,6 +2462,7 @@ export {
    normalizeDesignFacet,
    computeFacetNotesSummary,
    stretchStoneByVertices,
+   stretchStoneByLW,
    computeNormalFromPolar,
    generateFacesFromFacetList,
    buildDesignGcsText,

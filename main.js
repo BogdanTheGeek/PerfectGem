@@ -15,6 +15,7 @@ import {
    buildInstructionAngleCutSequence,
    normalizeDesignFacet,
    stretchStoneByVertices,
+   stretchStoneByLW,
    computeNormalFromPolar,
    generateFacesFromFacetList,
    computeFacetNotesSummary,
@@ -4945,16 +4946,19 @@ async function setupApp() {
 
    const designCrownRatioSlider = document.getElementById('designCrownRatioSlider');
    const designPavilionRatioSlider = document.getElementById('designPavilionRatioSlider');
+   const designLwRatioSlider = document.getElementById('designLwRatioSlider');
    const designCrownRatio = document.getElementById('designCrownRatio');
    const designPavilionRatio = document.getElementById('designPavilionRatio');
+   const designLwRatio = document.getElementById('designLwRatio');
    const designApplyScaleBtn = document.getElementById('designApplyScaleBtn');
    const designResetScaleBtn = document.getElementById('designResetScaleBtn');
 
    let suspendScaleAdjust = false;
    let pendingCrown = false;
    let pendingPavilion = false;
+   let pendingLw = false;
 
-   const buildScaledDesignStone = (crownVal, pavVal) => {
+   const buildScaledDesignStone = (crownVal, pavVal, lwVal, preview = false) => {
       const gear = parseInt(designGearEl.value, 10);
       const designDefinition = {
          gear: gear,
@@ -4963,52 +4967,72 @@ async function setupApp() {
          metadata: getMetadataFromDesign(),
       };
       let stone = buildStoneFromFacetDesign(designDefinition);
+      if (Math.abs(lwVal - 1.0) > 1e-6) {
+         stone = stretchStoneByLW(stone, lwVal, {
+            snapIndices: true,
+            roundingReport: preview,
+         });
+      }
       if (Math.abs(crownVal - 1.0) > 1e-6) stone = stretchStoneByVertices(stone, crownVal, true);
       if (Math.abs(pavVal - 1.0) > 1e-6) stone = stretchStoneByVertices(stone, pavVal, false);
+      normalizeStoneToUnitSphere(stone);
       return { stone, gear };
    };
 
-   const adjustRatio = (slider, label, crown = true) => {
+   const adjustRatio = (slider, label, kind = 'crown') => {
       if (suspendScaleAdjust) return;
-      if (crown) {
-         pendingCrown = true;
-      } else {
-         pendingPavilion = true;
-      }
+      if (kind === 'crown') pendingCrown = true;
+      else if (kind === 'pavilion') pendingPavilion = true;
+      else pendingLw = true;
       const movedVal = parseFloat(slider.value) || 1.0;
       label.textContent = movedVal.toFixed(3);
       const crownVal = parseFloat(designCrownRatioSlider.value) || 1.0;
       const pavVal = parseFloat(designPavilionRatioSlider.value) || 1.0;
-      const { stone, gear } = buildScaledDesignStone(crownVal, pavVal);
-      console.debug(`Gear ${gear} preview scales crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)} (moved ${crown ? 'crown' : 'pavilion'}=${movedVal.toFixed(3)})`);
+      const lwVal = parseFloat(designLwRatioSlider?.value) || 1.0;
+      const { stone, gear } = buildScaledDesignStone(crownVal, pavVal, lwVal, true);
+      console.debug(`Gear ${gear} preview scales lw=${lwVal.toFixed(3)} crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)} (moved ${kind}=${movedVal.toFixed(3)})`);
       console.debug('Stretched stone', stone);
       applyStoneData(currentModelFilename, stone, { syncDesignFromStone: false, isDesign: true });
-      setDesignStatus(`Scale preview crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)}`);
+      const rounding = stone?.lwRounding;
+      if (rounding && Number.isFinite(rounding.avgDelta)) {
+         setDesignStatus(
+            `Scale preview lw=${lwVal.toFixed(3)} crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)} | index rounding avg=${rounding.avgDelta.toFixed(3)} max=${rounding.maxDelta.toFixed(3)} (teeth)`,
+         );
+      } else {
+         setDesignStatus(`Scale preview lw=${lwVal.toFixed(3)} crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)}`);
+      }
    };
 
 
    designCrownRatioSlider.addEventListener('input', () => {
-      adjustRatio(designCrownRatioSlider, designCrownRatio, true);
+      adjustRatio(designCrownRatioSlider, designCrownRatio, 'crown');
    });
 
    designPavilionRatioSlider.addEventListener('input', () => {
-      adjustRatio(designPavilionRatioSlider, designPavilionRatio, false);
+      adjustRatio(designPavilionRatioSlider, designPavilionRatio, 'pavilion');
    });
+
+   if (designLwRatioSlider) {
+      designLwRatioSlider.addEventListener('input', () => {
+         adjustRatio(designLwRatioSlider, designLwRatio, 'lw');
+      });
+   }
 
    if (designApplyScaleBtn) {
       designApplyScaleBtn.addEventListener('click', () => {
          const crownVal = parseFloat(designCrownRatioSlider.value) || 1.0;
          const pavVal = parseFloat(designPavilionRatioSlider.value) || 1.0;
+         const lwVal = parseFloat(designLwRatioSlider?.value) || 1.0;
          const historyBefore = snapshotDesignFacets();
          suspendScaleAdjust = true;
          try {
-            const { stone, gear } = buildScaledDesignStone(crownVal, pavVal);
-            console.log(`Applying scales crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)} for gear ${gear}`);
+            const { stone, gear } = buildScaledDesignStone(crownVal, pavVal, lwVal, false);
+            console.log(`Applying scales lw=${lwVal.toFixed(3)} crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)} for gear ${gear}`);
             applyStoneData(currentModelFilename, stone, { syncDesignFromStone: false, isDesign: true });
             // rebuild design facets table from new stone
             setDesignFromStoneFacets(stone.facets || [], stone.sourceGear, { resetHistory: false });
             commitDesignHistory(historyBefore);
-            setDesignStatus(`Applied scales crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)}`);
+            setDesignStatus(`Applied scales lw=${lwVal.toFixed(3)} crown=${crownVal.toFixed(3)} pav=${pavVal.toFixed(3)}`);
          } catch (err) {
             console.error(err);
             setDesignStatus(`Apply scale failed: ${err?.message || 'error'}`);
@@ -5016,10 +5040,13 @@ async function setupApp() {
             // reset sliders to 1.0 to avoid repeated application
             designCrownRatioSlider.value = '1.0';
             designPavilionRatioSlider.value = '1.0';
+            if (designLwRatioSlider) designLwRatioSlider.value = '1.0';
             designCrownRatio.textContent = '1.000';
             designPavilionRatio.textContent = '1.000';
+            if (designLwRatio) designLwRatio.textContent = '1.000';
             pendingCrown = false;
             pendingPavilion = false;
+            pendingLw = false;
             suspendScaleAdjust = false;
          }
       });
@@ -5029,12 +5056,15 @@ async function setupApp() {
       suspendScaleAdjust = true;
       designCrownRatioSlider.value = '1.0';
       designPavilionRatioSlider.value = '1.0';
+      if (designLwRatioSlider) designLwRatioSlider.value = '1.0';
       designCrownRatio.textContent = '1.000';
       designPavilionRatio.textContent = '1.000';
+      if (designLwRatio) designLwRatio.textContent = '1.000';
       pendingCrown = false;
       pendingPavilion = false;
+      pendingLw = false;
       try {
-         const { stone } = buildScaledDesignStone(1.0, 1.0);
+         const { stone } = buildScaledDesignStone(1.0, 1.0, 1.0, false);
          applyStoneData(currentModelFilename, stone, { syncDesignFromStone: false, isDesign: true });
          setDesignStatus('Scale reset');
       } catch (err) {
