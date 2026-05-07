@@ -1797,7 +1797,8 @@ function groupExternalFacetsForDesign(facets = [], gear) {
 function buildInstructionAngleCutSequence(facets = [], gear) {
    const g = Math.max(1, parseInt(gear, 10) || 96);
    const groups = [];
-   const groupByAngle = new Map();
+   let currentCutKey = null;
+   let currentCut = null;
 
    const normalizeGearIndex = (value) => {
       const wrapped = wrapGearIndex(value, g);
@@ -1809,24 +1810,9 @@ function buildInstructionAngleCutSequence(facets = [], gear) {
       if (tag === 'BOOTSTRAP') continue;
 
       const angle = computeSignedFacetAngleDeg(facet?.normal || [0, 0, 1]);
-      const angleKey = angle.toFixed(2);
-      let group = groupByAngle.get(angleKey);
-      if (!group) {
-         group = {
-            angleKey,
-            angleDeg: angle,
-            angleLabel: `${Math.abs(angle).toFixed(2)}\u00b0`,
-            cuts: [],
-            _cutByKey: new Map(),
-         };
-         groupByAngle.set(angleKey, group);
-         groups.push(group);
-      }
-
       const cutKey = makeKeyFromFacet(facet);
-      let cut = group._cutByKey.get(cutKey);
-      if (!cut) {
-         cut = {
+      if (cutKey !== currentCutKey) {
+         currentCut = {
             name: String(facet?.name || '').trim() || '?',
             instructions: String(facet?.instructions || '').trim(),
             angleDeg: angle,
@@ -1835,22 +1821,27 @@ function buildInstructionAngleCutSequence(facets = [], gear) {
             indexes: [],
             _seenIndexes: new Set(),
          };
-         group._cutByKey.set(cutKey, cut);
-         group.cuts.push(cut);
+
+         groups.push({
+            angleKey: `${angle.toFixed(2)}-${groups.length}`,
+            angleDeg: angle,
+            angleLabel: `${Math.abs(angle).toFixed(2)}\u00b0`,
+            cuts: [currentCut],
+         });
+         currentCutKey = cutKey;
       }
 
       const parsed = parseFacetGearIndex(facet?.normal || [0, 0, 1], g);
       if (Number.isFinite(parsed) && parsed >= 0) {
          const nextIndex = normalizeGearIndex(parsed);
-         if (!cut._seenIndexes.has(nextIndex)) {
-            cut._seenIndexes.add(nextIndex);
-            cut.indexes.push(nextIndex);
+         if (!currentCut._seenIndexes.has(nextIndex)) {
+            currentCut._seenIndexes.add(nextIndex);
+            currentCut.indexes.push(nextIndex);
          }
       }
    }
 
    for (const group of groups) {
-      delete group._cutByKey;
       for (const cut of group.cuts) {
          delete cut._seenIndexes;
          const indexes = cut.indexes.length

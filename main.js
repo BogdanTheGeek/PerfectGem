@@ -1594,6 +1594,7 @@ async function setupApp() {
 
       renderFacetInfo(currentStone);
       setFacetStatus(`${currentStone.facets.length} generated facets from design`);
+   syncCutsSequenceFromDesignFacets();
       requestRender();
       return true;
    }
@@ -4916,6 +4917,32 @@ async function setupApp() {
       requestRender();
    }
 
+   function syncCutsSequenceFromDesignFacets() {
+      if (!designFacets.length) {
+         cutsSourceStone = null;
+         cutsSequence = [];
+         cutsAngleIndex = 0;
+         cutsIndexIndex = 0;
+         updateCutsReadout();
+         return;
+      }
+
+      try {
+         const gear = parseInt(designGearEl.value, 10);
+         const designDefinition = {
+            gear,
+            refractiveIndex: ui.ri,
+            facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
+            metadata: getMetadataFromDesign(),
+         };
+         const designStone = buildStoneFromFacetDesign(designDefinition);
+         setCutsSequenceFromStone(designStone);
+      } catch (err) {
+         console.warn('Cuts sequence sync failed from design facets:', err);
+         if (currentStone) setCutsSequenceFromStone(currentStone);
+      }
+   }
+
    function applyDesignStone(geometryChanged = true) {
       if (!geometryChanged) {
          if (applyDesignMetadataToCurrentStone()) {
@@ -4934,6 +4961,7 @@ async function setupApp() {
          };
          const stone = buildStoneFromFacetDesign(designDefinition);
          applyStoneData(currentModelFilename, stone, { syncDesignFromStone: false, isDesign: true });
+         setCutsSequenceFromStone(stone);
          setDesignStatus(designFacets.length
             ? `Applied ${designFacets.length} design facets`
             : 'Applied default cube (no facets yet)');
