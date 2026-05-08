@@ -4243,12 +4243,92 @@ async function setupApp() {
       selectionOverlayCtx.restore();
    }
 
+   function drawConcaveToolDebugOverlay() {
+      const tools = Array.isArray(currentStone?.concaveDebugTools) ? currentStone.concaveDebugTools : [];
+      if (!tools.length) return;
+
+      const maxDraw = Math.min(tools.length, 96);
+      selectionOverlayCtx.save();
+      selectionOverlayCtx.lineCap = 'round';
+      selectionOverlayCtx.lineJoin = 'round';
+      selectionOverlayCtx.font = '10px system-ui, sans-serif';
+      selectionOverlayCtx.textAlign = 'left';
+      selectionOverlayCtx.textBaseline = 'bottom';
+
+      for (let i = 0; i < maxDraw; i++) {
+         const tool = tools[i];
+         const center = Array.isArray(tool?.position) ? tool.position : null;
+         const normal = Array.isArray(tool?.normal) ? normalize3(tool.normal) : [0, 0, 1];
+         const radius = Math.max(0.005, Number(tool?.radius) || 0.03);
+         const pointCloud = Array.isArray(tool?.pointCloud) ? tool.pointCloud : [];
+         if (!center || center.length < 3) continue;
+
+         const centerScreen = modelPointToScreen(center);
+         if (!centerScreen) continue;
+
+         const radiusProbe = modelPointToScreen([center[0] + radius, center[1], center[2]]);
+         const radiusPx = radiusProbe
+            ? Math.max(3, Math.min(28, Math.hypot(radiusProbe.x - centerScreen.x, radiusProbe.y - centerScreen.y)))
+            : 6;
+
+         const inwardEnd = add3(center, scale3(normal, -Math.max(radius * 0.9, 0.02)));
+         const inwardScreen = modelPointToScreen(inwardEnd);
+
+         if (pointCloud.length > 0) {
+            const pointAlpha = pointCloud.length > 3000 ? 0.22 : 0.38;
+            selectionOverlayCtx.fillStyle = `rgba(120, 255, 255, ${pointAlpha})`;
+            const maxScreenPoints = 420;
+            const stride = Math.max(1, Math.ceil(pointCloud.length / maxScreenPoints));
+            for (let p = 0; p < pointCloud.length; p += stride) {
+               const point = pointCloud[p];
+               if (!Array.isArray(point) || point.length < 3) continue;
+               const screenPoint = modelPointToScreen(point);
+               if (!screenPoint) continue;
+               selectionOverlayCtx.fillRect(screenPoint.x - 1, screenPoint.y - 1, 2, 2);
+            }
+         }
+
+         selectionOverlayCtx.beginPath();
+         selectionOverlayCtx.arc(centerScreen.x, centerScreen.y, radiusPx, 0, Math.PI * 2);
+         selectionOverlayCtx.strokeStyle = 'rgba(255, 85, 70, 0.95)';
+         selectionOverlayCtx.lineWidth = 1.5;
+         selectionOverlayCtx.stroke();
+
+         selectionOverlayCtx.beginPath();
+         selectionOverlayCtx.arc(centerScreen.x, centerScreen.y, 2.5, 0, Math.PI * 2);
+         selectionOverlayCtx.fillStyle = 'rgba(255, 230, 120, 0.95)';
+         selectionOverlayCtx.fill();
+
+         if (inwardScreen) {
+            selectionOverlayCtx.beginPath();
+            selectionOverlayCtx.moveTo(centerScreen.x, centerScreen.y);
+            selectionOverlayCtx.lineTo(inwardScreen.x, inwardScreen.y);
+            selectionOverlayCtx.strokeStyle = 'rgba(255, 180, 110, 0.95)';
+            selectionOverlayCtx.lineWidth = 2;
+            selectionOverlayCtx.stroke();
+         }
+
+         if (i < 16) {
+            const label = `${tool?.facetName || 'C'}:${tool?.facetIndex ?? '?'}#${i + 1}`;
+            selectionOverlayCtx.fillStyle = 'rgba(255, 230, 180, 0.95)';
+            selectionOverlayCtx.fillText(label, centerScreen.x + radiusPx + 3, centerScreen.y - 2);
+         }
+      }
+
+      selectionOverlayCtx.restore();
+   }
+
    function drawDesignSelectionOverlay() {
       selectionOverlayCtx.clearRect(0, 0, selectionOverlayCssWidth, selectionOverlayCssHeight);
       const isDesignTab = currentGemTab === 'design';
       const showAnalyseFlatEdges = currentGemTab === 'controls' && ui.lightMode === 4;
       const showCutsEdges = currentGemTab === 'cuts';
       if (!isDesignTab && !showAnalyseFlatEdges && !showCutsEdges) return;
+
+      if (currentStone?.hasConcaveCutters) {
+         drawConcaveToolDebugOverlay();
+         return;
+      }
 
       buildDesignPickCacheIfNeeded();
       if (isDesignTab) drawDesignGearHalo();
@@ -4876,9 +4956,19 @@ async function setupApp() {
       const isDesign = options.isDesign ?? false;
       currentModelFilename = filename;
 
+      if (Number.isFinite(stone?.renderConvexFacetMode)) {
+         ui.convexFacetMode = stone.renderConvexFacetMode;
+      }
+
       const selectedVertexPosition = isDesign ? captureSingleSelectedVertexPosition() : null;
 
       currentStone = stone;
+      if (stone?.hasConcaveCutters) {
+         console.info('[concave-debug] applyStoneData', {
+            summary: stone?.concaveDebugSummary || null,
+            toolCount: Array.isArray(stone?.concaveDebugTools) ? stone.concaveDebugTools.length : 0,
+         });
+      }
       designHaloCache = null;
       invalidateDesignPickState(true);
       modelBoundsRadius = Math.max(0.1, computeMeshBoundsRadius(stone.vertexData));

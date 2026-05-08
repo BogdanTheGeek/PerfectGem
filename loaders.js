@@ -8,6 +8,7 @@ import {
    computeSignedFacetAngleDeg as geometryComputeSignedFacetAngleDeg,
    stretchStoneByVertices as geometryStretchStoneByVertices,
 } from './geometry.js';
+import CSG from './cgs/csg.js';
 
 let XMLParser = null;
 
@@ -22,6 +23,62 @@ const TABLE_FACET_MAX_ANGLE_DEG = 1.5;
 const EPS = 1e-9;
 const VERTEX_EPS = 1e-6;
 const FLAT_FACET_ANGLE_EPS_DEG = 1e-8;
+const CONCAVE_TOOL_RADIUS = 2.5;
+const CONCAVE_DEBUG_POINT_CLOUD_MAX_POINTS = 1200;
+
+let concaveToolStone = null;
+let concaveToolScale = 1;
+let concaveToolLoadError = null;
+
+function cloneArrayBufferView(view) {
+   if (view instanceof ArrayBuffer) {
+      return view.slice(0);
+   }
+   if (ArrayBuffer.isView(view)) {
+      return view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+   }
+   throw new Error('Unsupported buffer type');
+}
+
+async function readConcaveToolBuffer() {
+   if (typeof window === 'undefined') {
+      const fs = await import('node:fs');
+      const url = new URL('./tool_lp.stl', import.meta.url);
+      const fileData = fs.readFileSync(url);
+      return cloneArrayBufferView(fileData);
+   }
+
+   const response = await fetch('./tool_lp.stl');
+   if (!response.ok) {
+      throw new Error(`Failed to fetch tool_lp.stl (${response.status})`);
+   }
+   return response.arrayBuffer();
+}
+
+function measureToolRadialExtent(stone) {
+   const data = stone?.vertexData;
+   if (!(data instanceof Float32Array) || data.length < 3) return 1;
+   let maxRadius = 0;
+   for (let i = 0; i < data.length; i += 7) {
+      const x = data[i + 0];
+      const y = data[i + 1];
+      const radius = Math.hypot(x, y);
+      if (radius > maxRadius) maxRadius = radius;
+   }
+   return Math.max(1e-6, maxRadius);
+}
+
+async function initConcaveToolMesh() {
+   try {
+      const buffer = await readConcaveToolBuffer();
+      concaveToolStone = await loadSTL(buffer);
+      const toolRadius = measureToolRadialExtent(concaveToolStone);
+      concaveToolScale = CONCAVE_TOOL_RADIUS / toolRadius;
+   } catch (error) {
+      concaveToolLoadError = error;
+      console.warn('Concave tool mesh unavailable:', error);
+   }
+}
 
 function isNegativeZero(value) {
    return geometryIsNegativeZero(value);
@@ -81,6 +138,8 @@ async function loadSTL(buffer) {
 
    return new StoneData(vertexData, triangleCount);
 }
+
+await initConcaveToolMesh();
 
 function normalizeFacetMetadata(name, instructions) {
    const rawName = String(name || '').trim();
@@ -276,6 +335,16 @@ function buildFacetInfo(stone, summary = null) {
 
    if (!summary) {
       summary = computeFacetNotesSummary(stone);
+   }
+   if (!summary) {
+      summary = {
+         lw: 0,
+         pw: 0,
+         cw: 0,
+         uw: 0,
+         tw: 0,
+         gearUsed: Number.isFinite(parseInt(stone?.sourceGear, 10)) ? parseInt(stone.sourceGear, 10) : 96,
+      };
    }
    const groupedSections = groupFacetInfo(facets, summary.gearUsed);
    const sectionOrder = ['PAVILION', 'CROWN', 'OTHER'];
@@ -927,6 +996,477 @@ function computeNormalFromPolar(angleDeg, index, gear, gearOffset = 0) {
    return geometryComputeNormalFromPolar(angleDeg, index, gear, gearOffset);
 };
 
+function isConcaveFacetInstructions(instructions) {
+   return /\bconcave\b/i.test(String(instructions || ''));
+}
+
+function computeFacetIndexSet(facet, gear) {
+   const symmetryValue = parseInt(facet?.symmetry, 10);
+   const symmetry = Math.max(1, Number.isFinite(symmetryValue) ? symmetryValue : 1);
+   const mirror = Boolean(facet?.mirror);
+   const step = gear / symmetry;
+   const indexSet = new Set();
+
+   const explicitIndexes = Array.isArray(facet?.indexes)
+      ? [...new Set(
+         facet.indexes
+            .map((value) => parseInt(value, 10))
+            .filter((value) => Number.isFinite(value) && value >= 0)
+            .map((value) => (value === 0 ? gear : value))
+            .map((value) => wrapGearIndex(value, gear)),
+      )]
+      : [];
+
+   if (explicitIndexes.length > 0) {
+      explicitIndexes.forEach((value) => indexSet.add(value));
+      return indexSet;
+   }
+
+   const startRaw = parseFloat(facet?.startIndex);
+   const startIndex = Number.isFinite(startRaw) ? wrapGearIndex(startRaw, gear) : 1;
+   for (let i = 0; i < symmetry; i++) {
+      const offset = i * step;
+      const primary = wrapGearIndex(startIndex + offset, gear);
+      indexSet.add(primary);
+      if (mirror) {
+         indexSet.add(mirrorIndex(primary, gear));
+      }
+   }
+   return indexSet;
+}
+
+function orientTriangleByNormal(p0, p1, p2, normal) {
+   const ux = p1[0] - p0[0];
+   const uy = p1[1] - p0[1];
+   const uz = p1[2] - p0[2];
+   const vx = p2[0] - p0[0];
+   const vy = p2[1] - p0[1];
+   const vz = p2[2] - p0[2];
+   const cx = uy * vz - uz * vy;
+   const cy = uz * vx - ux * vz;
+   const cz = ux * vy - uy * vx;
+   const dot = cx * normal[0] + cy * normal[1] + cz * normal[2];
+   if (!Number.isFinite(dot) || dot >= 0) {
+      return [p0, p1, p2];
+   }
+   return [p0, p2, p1];
+}
+
+function stoneDataToCSG(stone) {
+   const polygons = [];
+   const data = stone.vertexData;
+   for (let tri = 0; tri < stone.triangleCount; tri++) {
+      const base = tri * 21;
+      const p0 = [data[base + 0], data[base + 1], data[base + 2]];
+      const p1 = [data[base + 7], data[base + 8], data[base + 9]];
+      const p2 = [data[base + 14], data[base + 15], data[base + 16]];
+      const normal = [data[base + 3], data[base + 4], data[base + 5]];
+      const [o0, o1, o2] = orientTriangleByNormal(p0, p1, p2, normal);
+
+      const v0 = new CSG.Vertex(new CSG.Vector(o0), new CSG.Vector(normal));
+      const v1 = new CSG.Vertex(new CSG.Vector(o1), new CSG.Vector(normal));
+      const v2 = new CSG.Vertex(new CSG.Vector(o2), new CSG.Vector(normal));
+      polygons.push(new CSG.Polygon([v0, v1, v2]));
+   }
+   return CSG.fromPolygons(polygons);
+}
+
+function computeTriangleArea(p0, p1, p2) {
+   const ux = p1[0] - p0[0];
+   const uy = p1[1] - p0[1];
+   const uz = p1[2] - p0[2];
+   const vx = p2[0] - p0[0];
+   const vy = p2[1] - p0[1];
+   const vz = p2[2] - p0[2];
+   const cx = uy * vz - uz * vy;
+   const cy = uz * vx - ux * vz;
+   const cz = ux * vy - uy * vx;
+   return 0.5 * Math.hypot(cx, cy, cz);
+}
+
+function stitchTinyBoundaryHoles(triangles, options = {}) {
+   const weldTolerance = Number.isFinite(options.weldTolerance) ? options.weldTolerance : 1e-4;
+   const areaTolerance = Number.isFinite(options.areaTolerance) ? options.areaTolerance : 1e-10;
+   const maxHoleEdges = Number.isFinite(options.maxHoleEdges) ? options.maxHoleEdges : 24;
+   const maxHolePerimeter = Number.isFinite(options.maxHolePerimeter) ? options.maxHolePerimeter : 0.2;
+
+   const quant = (v) => Math.round(v / weldTolerance);
+   const points = [];
+   const pointMap = new Map();
+
+   function pointKey(p) {
+      return `${quant(p[0])}|${quant(p[1])}|${quant(p[2])}`;
+   }
+
+   function getPointIndex(p) {
+      const key = pointKey(p);
+      const existing = pointMap.get(key);
+      if (existing !== undefined) return existing;
+      const idx = points.length;
+      points.push([p[0], p[1], p[2]]);
+      pointMap.set(key, idx);
+      return idx;
+   }
+
+   const triIdx = [];
+   for (const tri of triangles) {
+      const i0 = getPointIndex(tri[0]);
+      const i1 = getPointIndex(tri[1]);
+      const i2 = getPointIndex(tri[2]);
+      if (i0 === i1 || i1 === i2 || i0 === i2) continue;
+      const area = computeTriangleArea(points[i0], points[i1], points[i2]);
+      if (!Number.isFinite(area) || area <= areaTolerance) continue;
+      triIdx.push([i0, i1, i2]);
+   }
+
+   const undirectedCounts = new Map();
+   const directedBoundary = [];
+   const makeUndirectedKey = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+   for (const [a, b, c] of triIdx) {
+      const edges = [[a, b], [b, c], [c, a]];
+      for (const [u, v] of edges) {
+         const key = makeUndirectedKey(u, v);
+         undirectedCounts.set(key, (undirectedCounts.get(key) || 0) + 1);
+         directedBoundary.push([u, v, key]);
+      }
+   }
+
+   const boundaryEdges = directedBoundary.filter(([, , key]) => undirectedCounts.get(key) === 1);
+   const outgoing = new Map();
+   boundaryEdges.forEach(([a, b], edgeId) => {
+      if (!outgoing.has(a)) outgoing.set(a, []);
+      outgoing.get(a).push({ b, edgeId });
+   });
+
+   const used = new Set();
+   const loops = [];
+   for (let i = 0; i < boundaryEdges.length; i++) {
+      if (used.has(i)) continue;
+      const [startA, startB] = boundaryEdges[i];
+      const loop = [startA, startB];
+      used.add(i);
+      let current = startB;
+      let guard = 0;
+      while (guard++ < 2048) {
+         const nextEdges = (outgoing.get(current) || []).filter((edge) => !used.has(edge.edgeId));
+         if (!nextEdges.length) break;
+         const next = nextEdges[0];
+         used.add(next.edgeId);
+         current = next.b;
+         if (current === loop[0]) {
+            loops.push(loop.slice());
+            break;
+         }
+         if (loop.includes(current)) break;
+         loop.push(current);
+      }
+   }
+
+   let stitchedHoles = 0;
+   for (const loop of loops) {
+      if (loop.length < 3 || loop.length > maxHoleEdges) continue;
+
+      let perimeter = 0;
+      for (let i = 0; i < loop.length; i++) {
+         const a = points[loop[i]];
+         const b = points[loop[(i + 1) % loop.length]];
+         perimeter += Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+      }
+      if (!Number.isFinite(perimeter) || perimeter > maxHolePerimeter) continue;
+
+      let cx = 0; let cy = 0; let cz = 0;
+      for (const idx of loop) {
+         cx += points[idx][0];
+         cy += points[idx][1];
+         cz += points[idx][2];
+      }
+      cx /= loop.length;
+      cy /= loop.length;
+      cz /= loop.length;
+      const centerIdx = points.length;
+      points.push([cx, cy, cz]);
+
+      let nx = 0; let ny = 0; let nz = 0;
+      for (let i = 0; i < loop.length; i++) {
+         const p = points[loop[i]];
+         const q = points[loop[(i + 1) % loop.length]];
+         nx += (p[1] - q[1]) * (p[2] + q[2]);
+         ny += (p[2] - q[2]) * (p[0] + q[0]);
+         nz += (p[0] - q[0]) * (p[1] + q[1]);
+      }
+      const nLen = Math.hypot(nx, ny, nz);
+      const loopNormal = nLen > 1e-10 ? [nx / nLen, ny / nLen, nz / nLen] : [0, 0, 1];
+
+      for (let i = 0; i < loop.length; i++) {
+         const a = loop[i];
+         const b = loop[(i + 1) % loop.length];
+         const pa = points[a];
+         const pb = points[b];
+         const pc = points[centerIdx];
+         const [o0, o1, o2] = orientTriangleByNormal(pa, pb, pc, loopNormal);
+         const i0 = getPointIndex(o0);
+         const i1 = getPointIndex(o1);
+         const i2 = getPointIndex(o2);
+         if (i0 === i1 || i1 === i2 || i0 === i2) continue;
+         const area = computeTriangleArea(points[i0], points[i1], points[i2]);
+         if (!Number.isFinite(area) || area <= areaTolerance) continue;
+         triIdx.push([i0, i1, i2]);
+      }
+      stitchedHoles += 1;
+   }
+
+   return { points, triIdx, stitchedHoles, boundaryEdges: boundaryEdges.length };
+}
+
+function csgToStoneData(csg, baseStone, sourceGear, metadata = {}) {
+   const polygons = csg.toPolygons();
+   const rawTriangles = [];
+
+   for (const polygon of polygons) {
+      const polyVertices = polygon?.vertices || [];
+      if (polyVertices.length < 3) continue;
+
+      let nx = Number(polygon?.plane?.normal?.x);
+      let ny = Number(polygon?.plane?.normal?.y);
+      let nz = Number(polygon?.plane?.normal?.z);
+      let nLen = Math.hypot(nx, ny, nz);
+      if (!Number.isFinite(nLen) || nLen < 1e-12) {
+         const a = polyVertices[0].pos;
+         const b = polyVertices[1].pos;
+         const c = polyVertices[2].pos;
+         const ux = b.x - a.x;
+         const uy = b.y - a.y;
+         const uz = b.z - a.z;
+         const vx = c.x - a.x;
+         const vy = c.y - a.y;
+         const vz = c.z - a.z;
+         nx = uy * vz - uz * vy;
+         ny = uz * vx - ux * vz;
+         nz = ux * vy - uy * vx;
+         nLen = Math.hypot(nx, ny, nz);
+      }
+      if (!Number.isFinite(nLen) || nLen < 1e-12) continue;
+      nx /= nLen;
+      ny /= nLen;
+      nz /= nLen;
+      const faceNormal = [nx, ny, nz];
+
+      for (let i = 1; i < polyVertices.length - 1; i++) {
+         const v0 = polyVertices[0].pos;
+         const v1 = polyVertices[i].pos;
+         const v2 = polyVertices[i + 1].pos;
+         const [o0, o1, o2] = orientTriangleByNormal(
+            [v0.x, v0.y, v0.z],
+            [v1.x, v1.y, v1.z],
+            [v2.x, v2.y, v2.z],
+            faceNormal,
+         );
+         rawTriangles.push([o0, o1, o2]);
+      }
+   }
+
+    const stitched = stitchTinyBoundaryHoles(rawTriangles);
+    if (stitched.stitchedHoles > 0) {
+      console.log('[concave-csg] stitched tiny holes', {
+         holes: stitched.stitchedHoles,
+         boundaryEdges: stitched.boundaryEdges,
+      });
+   }
+
+   const vertices = [];
+   for (const [i0, i1, i2] of stitched.triIdx) {
+      const p0 = stitched.points[i0];
+      const p1 = stitched.points[i1];
+      const p2 = stitched.points[i2];
+      const ux = p1[0] - p0[0];
+      const uy = p1[1] - p0[1];
+      const uz = p1[2] - p0[2];
+      const vx = p2[0] - p0[0];
+      const vy = p2[1] - p0[1];
+      const vz = p2[2] - p0[2];
+      let nx = uy * vz - uz * vy;
+      let ny = uz * vx - ux * vz;
+      let nz = ux * vy - uy * vx;
+      const nLen = Math.hypot(nx, ny, nz);
+      if (!Number.isFinite(nLen) || nLen < 1e-12) continue;
+      nx /= nLen;
+      ny /= nLen;
+      nz /= nLen;
+
+      vertices.push(p0[0], p0[1], p0[2], nx, ny, nz, 0);
+      vertices.push(p1[0], p1[1], p1[2], nx, ny, nz, 0);
+      vertices.push(p2[0], p2[1], p2[2], nx, ny, nz, 0);
+   }
+
+   const vertexData = new Float32Array(vertices);
+   const triangleCount = Math.floor(vertexData.length / 21);
+
+   return new StoneData(
+      vertexData,
+      triangleCount,
+      Array.isArray(baseStone?.facets) ? baseStone.facets : [],
+      baseStone?.refractiveIndex,
+      baseStone?.dispersion,
+      sourceGear,
+      metadata,
+   );
+}
+
+function transformedConcaveToolCSG(normal, centerDistance) {
+   if (!concaveToolStone) {
+      if (concaveToolLoadError) {
+         throw new Error(`Concave tool load failed: ${concaveToolLoadError.message || concaveToolLoadError}`);
+      }
+      throw new Error('Concave tool mesh not loaded');
+   }
+
+   const frame = buildConcaveToolFrame(normal, centerDistance);
+   const inwardY = frame.inwardY;
+   const xAxis = frame.xAxis;
+   const zAxis = frame.zAxis;
+   const position = frame.position;
+
+   const polygons = [];
+   const data = concaveToolStone.vertexData;
+   for (let tri = 0; tri < concaveToolStone.triangleCount; tri++) {
+      const base = tri * 21;
+      const transformed = [];
+
+      for (let v = 0; v < 3; v++) {
+         const p = base + v * 7;
+         const lx = data[p + 0] * concaveToolScale;
+         const ly = data[p + 1] * concaveToolScale;
+         const lz = data[p + 2] * concaveToolScale;
+
+         const wx = position[0] + xAxis[0] * lx + inwardY[0] * ly + zAxis[0] * lz;
+         const wy = position[1] + xAxis[1] * lx + inwardY[1] * ly + zAxis[1] * lz;
+         const wz = position[2] + xAxis[2] * lx + inwardY[2] * ly + zAxis[2] * lz;
+
+         const lnx = data[p + 3];
+         const lny = data[p + 4];
+         const lnz = data[p + 5];
+         let wnx = xAxis[0] * lnx + inwardY[0] * lny + zAxis[0] * lnz;
+         let wny = xAxis[1] * lnx + inwardY[1] * lny + zAxis[1] * lnz;
+         let wnz = xAxis[2] * lnx + inwardY[2] * lny + zAxis[2] * lnz;
+         const nLen = Math.hypot(wnx, wny, wnz);
+         if (nLen > 1e-8) {
+            wnx /= nLen;
+            wny /= nLen;
+            wnz /= nLen;
+         } else {
+            wnx = 0;
+            wny = 0;
+            wnz = 1;
+         }
+
+         transformed.push({ pos: [wx, wy, wz], normal: [wnx, wny, wnz] });
+      }
+
+      const triNormal = transformed[0].normal;
+      const [o0, o1, o2] = orientTriangleByNormal(
+         transformed[0].pos,
+         transformed[1].pos,
+         transformed[2].pos,
+         triNormal,
+      );
+
+      const v0 = new CSG.Vertex(new CSG.Vector(o0), new CSG.Vector(triNormal));
+      const v1 = new CSG.Vertex(new CSG.Vector(o1), new CSG.Vector(triNormal));
+      const v2 = new CSG.Vertex(new CSG.Vector(o2), new CSG.Vector(triNormal));
+
+      polygons.push(new CSG.Polygon([v0, v1, v2]));
+   }
+
+   return CSG.fromPolygons(polygons);
+}
+
+function buildConcaveToolFrame(normal, centerDistance) {
+   // Tool local +Y should point toward stone center.
+   // The design facet normal is outward (center -> facet), so +Y aligns with +normal.
+   const inwardY = [normal[0], normal[1], normal[2]];
+   let xAxis = [-inwardY[1], inwardY[0], 0];
+   let xLen = Math.hypot(xAxis[0], xAxis[1], xAxis[2]);
+   if (!Number.isFinite(xLen) || xLen < 1e-8) {
+      xAxis = [1, 0, 0];
+      xLen = 1;
+   }
+   xAxis = [xAxis[0] / xLen, xAxis[1] / xLen, xAxis[2] / xLen];
+   const zAxis = [
+      inwardY[1] * xAxis[2] - inwardY[2] * xAxis[1],
+      inwardY[2] * xAxis[0] - inwardY[0] * xAxis[2],
+      inwardY[0] * xAxis[1] - inwardY[1] * xAxis[0],
+   ];
+
+   const position = [
+      normal[0] * centerDistance,
+      normal[1] * centerDistance,
+      normal[2] * centerDistance,
+   ];
+
+   return { inwardY, xAxis, zAxis, position };
+}
+
+function transformedConcaveToolPointCloud(normal, centerDistance, maxPoints = CONCAVE_DEBUG_POINT_CLOUD_MAX_POINTS) {
+   const frame = buildConcaveToolFrame(normal, centerDistance);
+   const inwardY = frame.inwardY;
+   const xAxis = frame.xAxis;
+   const zAxis = frame.zAxis;
+   const position = frame.position;
+   const data = concaveToolStone?.vertexData;
+   if (!(data instanceof Float32Array) || data.length < 7) return [];
+
+   const totalVertices = Math.floor(data.length / 7);
+   const target = Math.max(1, Math.floor(maxPoints));
+   const strideVertices = Math.max(1, Math.ceil(totalVertices / target));
+
+   const points = [];
+   for (let i = 0, vi = 0; i < data.length; i += 7, vi++) {
+      if ((vi % strideVertices) !== 0) continue;
+      const lx = data[i + 0] * concaveToolScale;
+      const ly = data[i + 1] * concaveToolScale;
+      const lz = data[i + 2] * concaveToolScale;
+      const wx = position[0] + xAxis[0] * lx + inwardY[0] * ly + zAxis[0] * lz;
+      const wy = position[1] + xAxis[1] * lx + inwardY[1] * ly + zAxis[1] * lz;
+      const wz = position[2] + xAxis[2] * lx + inwardY[2] * ly + zAxis[2] * lz;
+      points.push([wx, wy, wz]);
+      if (points.length >= target) break;
+   }
+   return points;
+}
+
+function csgBounds(csgSolid) {
+   const polygons = csgSolid?.toPolygons?.() || [];
+   let minX = Infinity; let minY = Infinity; let minZ = Infinity;
+   let maxX = -Infinity; let maxY = -Infinity; let maxZ = -Infinity;
+   let found = false;
+   for (const polygon of polygons) {
+      const verts = polygon?.vertices || [];
+      for (const v of verts) {
+         const x = Number(v?.pos?.x);
+         const y = Number(v?.pos?.y);
+         const z = Number(v?.pos?.z);
+         if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+         found = true;
+         if (x < minX) minX = x;
+         if (y < minY) minY = y;
+         if (z < minZ) minZ = z;
+         if (x > maxX) maxX = x;
+         if (y > maxY) maxY = y;
+         if (z > maxZ) maxZ = z;
+      }
+   }
+   if (!found) return null;
+   return { minX, minY, minZ, maxX, maxY, maxZ };
+}
+
+function boundsOverlap(a, b) {
+   if (!a || !b) return true;
+   if (a.maxX < b.minX || b.maxX < a.minX) return false;
+   if (a.maxY < b.minY || b.maxY < a.minY) return false;
+   if (a.maxZ < b.minZ || b.maxZ < a.minZ) return false;
+   return true;
+}
+
 function buildStoneFromFacetDesign(definition = {}) {
    const facets = Array.isArray(definition.facets) ? definition.facets : [];
    const ri = parseFloat(definition.refractiveIndex);
@@ -935,50 +1475,35 @@ function buildStoneFromFacetDesign(definition = {}) {
 
    const planes = createBootstrapCubePlanes(1.0);
 
+   const concaveCuts = [];
+
    facets.forEach((facet, idx) => {
       const facetName = String(facet?.name || `F${idx + 1}`).trim();
       const instructions = String(facet?.instructions || '').trim();
       const normalized = normalizeFacetMetadata(facetName, instructions);
 
-
-      const symmetryValue = parseInt(facet?.symmetry, 10);
-      const symmetry = Math.max(1, Number.isFinite(symmetryValue) ? symmetryValue : 1);
-
       const angle = parseFloat(facet?.angleDeg);
       const angleDeg = Number.isFinite(angle) ? Math.max(-90.0, Math.min(90.0, angle)) : 0;
-
-      const startRaw = parseFloat(facet?.startIndex);
-      const startIndex = Number.isFinite(startRaw) ? wrapGearIndex(startRaw, gear) : 1;
 
       const distanceRaw = parseFloat(facet?.distance);
       const distance = Number.isFinite(distanceRaw) ? distanceRaw : 1.0;
       const d = Math.max(1e-5, Math.abs(distance));
+      const indexSet = computeFacetIndexSet(facet, gear);
 
-      const mirror = Boolean(facet?.mirror);
-      const step = gear / symmetry;
-      const indexSet = new Set();
-
-      const explicitIndexes = Array.isArray(facet?.indexes)
-         ? [...new Set(
-            facet.indexes
-               .map((value) => parseInt(value, 10))
-               .filter((value) => Number.isFinite(value) && value >= 0)
-               .map((value) => (value === 0 ? gear : value))
-               .map((value) => wrapGearIndex(value, gear)),
-         )]
-         : [];
-
-      if (explicitIndexes.length > 0) {
-         explicitIndexes.forEach((value) => indexSet.add(value));
-      } else {
-         for (let i = 0; i < symmetry; i++) {
-            const offset = i * step;
-            const primary = wrapGearIndex(startIndex + offset, gear);
-            indexSet.add(primary);
-            if (mirror) {
-               indexSet.add(mirrorIndex(primary, gear));
-            }
+      if (isConcaveFacetInstructions(normalized.instructions)) {
+         for (const index of indexSet) {
+            const normal = computeNormalFromPolar(angleDeg, index, gear, 0);
+            const len = Math.hypot(normal[0], normal[1], normal[2]);
+            if (!Number.isFinite(len) || len < 1e-9) continue;
+            concaveCuts.push({
+               normal: [normal[0] / len, normal[1] / len, normal[2] / len],
+               distance: d,
+               index,
+               angleDeg,
+               name: normalized.name,
+            });
          }
+         return;
       }
 
       if (isFlatFacetAngleDeg(angleDeg)) {
@@ -1023,7 +1548,122 @@ function buildStoneFromFacetDesign(definition = {}) {
       throw new Error('Design: no facets defined');
    }
 
-   return buildStoneFromHalfSpacePlanes(planes, refractiveIndex, gear, definition.metadata || {});
+   const convexStone = buildStoneFromHalfSpacePlanes(planes, refractiveIndex, gear, definition.metadata || {});
+   if (!concaveCuts.length) {
+      convexStone.hasConcaveCutters = false;
+      convexStone.renderConvexFacetMode = 1;
+      convexStone.concaveDebugTools = [];
+      return convexStone;
+   }
+
+   let csgStone = stoneDataToCSG(convexStone);
+   let csgPolygonCount = csgStone.toPolygons().length;
+   const basePolygonCount = csgPolygonCount;
+   const baseStoneBounds = csgBounds(csgStone);
+   const concaveDebugTools = [];
+   console.groupCollapsed(`[concave-csg] facets=${concaveCuts.length} baseTriangles=${convexStone.triangleCount} basePolygons=${csgPolygonCount}`);
+   const prevCsgEpsilon = CSG?.Plane?.EPSILON;
+   if (Number.isFinite(prevCsgEpsilon)) {
+      CSG.Plane.EPSILON = Math.max(prevCsgEpsilon, 5e-3);
+   }
+   try {
+      for (const cut of concaveCuts) {
+         const toolDistance = cut.distance + CONCAVE_TOOL_RADIUS;
+         const position = [
+            cut.normal[0] * toolDistance,
+            cut.normal[1] * toolDistance,
+            cut.normal[2] * toolDistance,
+         ];
+         concaveDebugTools.push({
+            normal: [cut.normal[0], cut.normal[1], cut.normal[2]],
+            position,
+            radius: CONCAVE_TOOL_RADIUS,
+            distance: cut.distance,
+            toolDistance,
+            facetIndex: cut.index,
+            facetAngleDeg: cut.angleDeg,
+            facetName: cut.name,
+            pointCloud: transformedConcaveToolPointCloud(cut.normal, toolDistance),
+         });
+
+         if (concaveDebugTools.length <= 24) {
+            console.log('[concave-csg] cutter', {
+               i: concaveDebugTools.length,
+               facet: cut.name,
+               index: cut.index,
+               angleDeg: Number(cut.angleDeg.toFixed(4)),
+               distance: Number(cut.distance.toFixed(6)),
+               toolDistance: Number(toolDistance.toFixed(6)),
+               normal: cut.normal.map((v) => Number(v.toFixed(6))),
+               position: position.map((v) => Number(v.toFixed(6))),
+            });
+         }
+
+         const tool = transformedConcaveToolCSG(cut.normal, toolDistance);
+         const toolBounds = csgBounds(tool);
+         if (!boundsOverlap(baseStoneBounds, toolBounds)) {
+            if (concaveDebugTools.length <= 24) {
+               console.log('[concave-csg] skip (no bounds overlap)', {
+                  i: concaveDebugTools.length,
+               });
+            }
+            continue;
+         }
+
+         const toolPolygons = tool.toPolygons().length;
+         const beforeSubtract = csgPolygonCount;
+         csgStone = csgStone.subtract(tool);
+         csgPolygonCount = csgStone.toPolygons().length;
+         if (concaveDebugTools.length <= 24) {
+            console.log('[concave-csg] subtract', {
+               i: concaveDebugTools.length,
+               polygonsBefore: beforeSubtract,
+               toolPolygons,
+               polygonsAfter: csgPolygonCount,
+            });
+         }
+      }
+   } finally {
+      if (Number.isFinite(prevCsgEpsilon)) {
+         CSG.Plane.EPSILON = prevCsgEpsilon;
+      }
+   }
+   console.groupEnd();
+
+   const result = csgToStoneData(csgStone, convexStone, gear, definition.metadata || {});
+   result.hasConcaveCutters = true;
+   result.renderConvexFacetMode = 0;
+   result.concaveDebugTools = concaveDebugTools;
+   result.concaveDebugSummary = {
+      cutters: concaveDebugTools.length,
+      baseTriangles: convexStone.triangleCount,
+      resultTriangles: result.triangleCount,
+      basePolygons: basePolygonCount,
+      resultPolygons: csgPolygonCount,
+   };
+   if (!Number.isFinite(result.triangleCount) || result.triangleCount <= 0) {
+      console.error('[concave-csg] result has no triangles after subtraction');
+      const fallback = new StoneData(
+         convexStone.vertexData,
+         convexStone.triangleCount,
+         Array.isArray(convexStone.facets) ? convexStone.facets : [],
+         convexStone.refractiveIndex,
+         convexStone.dispersion,
+         convexStone.sourceGear,
+         convexStone.metadata,
+      );
+      fallback.hasConcaveCutters = true;
+      fallback.renderConvexFacetMode = 1;
+      fallback.concaveDebugTools = concaveDebugTools;
+      fallback.concaveDebugSummary = {
+         ...result.concaveDebugSummary,
+         fallbackToConvex: true,
+      };
+      return fallback;
+   } else {
+      console.log('[concave-csg] done', result.concaveDebugSummary);
+   }
+   return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1339,6 +1979,30 @@ function normalizeStoneToUnitSphere(stone) {
          return {
             ...facet,
             d: facet.d * scale,
+         };
+      });
+   }
+
+   if (Array.isArray(stone.concaveDebugTools) && stone.concaveDebugTools.length > 0) {
+      stone.concaveDebugTools = stone.concaveDebugTools.map((tool) => {
+         const p = Array.isArray(tool?.position) ? tool.position : [0, 0, 0];
+         return {
+            ...tool,
+            position: [
+               (Number(p[0]) || 0) * scale,
+               (Number(p[1]) || 0) * scale,
+               (Number(p[2]) || 0) * scale,
+            ],
+            pointCloud: Array.isArray(tool?.pointCloud)
+               ? tool.pointCloud.map((point) => [
+                  (Number(point?.[0]) || 0) * scale,
+                  (Number(point?.[1]) || 0) * scale,
+                  (Number(point?.[2]) || 0) * scale,
+               ])
+               : [],
+            radius: (Number(tool?.radius) || 0) * scale,
+            distance: (Number(tool?.distance) || 0) * scale,
+            toolDistance: (Number(tool?.toolDistance) || 0) * scale,
          };
       });
    }
