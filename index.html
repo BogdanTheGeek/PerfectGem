@@ -111,6 +111,9 @@
         }
         #gemui #exitColor,
         #gemui #headShadowColor,
+        #gemui #axisAColor,
+        #gemui #axisBColor,
+        #gemui #axisCColor,
         #gemui #bgColor { width: 100%; height: 28px; border-radius: 6px; border: none; cursor: pointer; }
         #gemui .colorRow {
             display: flex;
@@ -807,8 +810,8 @@
                 <input type="range" id="codSlider" min="0.000" max="0.120" step="0.001" value="0.013">
             </div>
             <div class="row">
-                <label>Clarity <span class="val" id="clarityVal">1.0</span></label>
-                <input type="range" id="claritySlider" min="0.000" max="1.000" step="0.001" value="1.000">
+                <label>Clarity <span class="val" id="clarityVal">0.5</span></label>
+                <input type="range" id="claritySlider" min="0.000" max="1.000" step="0.001" value="0.500">
             </div>
             <hr class="divider">
             <div class="designGrid">
@@ -830,11 +833,6 @@
 
             <hr class="divider">
 
-            <div class="row">
-                <label>Stone Colour</label>
-                <div class="swatches" id="swatches"><!-- populated by JS --></div>
-            </div>
-
             <div class="row colorRow">
                 <div class="colorCol">
                     <label>Background</label>
@@ -848,6 +846,40 @@
                     <label>Head Shadow</label>
                     <input type="color" id="headShadowColor">
                 </div>
+            </div>
+            <div class="row colorRow">
+                <div class="colorCol">
+                    <label>Axis A</label>
+                    <input type="color" id="axisAColor">
+                </div>
+                <div class="colorCol">
+                    <label>Axis B</label>
+                    <input type="color" id="axisBColor">
+                </div>
+                <div class="colorCol">
+                    <label>Axis C</label>
+                    <input type="color" id="axisCColor">
+                </div>
+            </div>
+
+            <div class="row">
+                <label>Colour Presets</label>
+                <div class="swatches" id="swatches"><!-- populated by JS --></div>
+            </div>
+
+            <div class="row">
+                <label>Axis Orientation X <span class="val" id="axisTiltXVal">0</span></label>
+                <input type="range" id="axisTiltXSlider" min="0" max="90" step="1" value="0">
+            </div>
+
+            <div class="row">
+                <label>Axis Orientation Y <span class="val" id="axisTiltYVal">0</span></label>
+                <input type="range" id="axisTiltYSlider" min="0" max="90" step="1" value="0">
+            </div>
+
+            <div class="row">
+                <label>Axis Orientation Z <span class="val" id="axisTiltZVal">0</span></label>
+                <input type="range" id="axisTiltZSlider" min="0" max="90" step="1" value="0">
             </div>
 
             <div class="row">

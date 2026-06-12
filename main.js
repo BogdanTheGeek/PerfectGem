@@ -34,22 +34,26 @@ const computeShaderSource = await (await fetch('compute.wgsl')).text();
 // Toggle debug overlays/features
 var DEBUG = true;
 
-// Gem species presets  [name, RI, COD, hex-colour]
+// Gem species presets  [name, RI, COD, axisAHex, axisBHex, axisCHex]
 const presets = [
-   ['Quartz', 1.544, 0.013, '#e8e8e8'],
-   ['Diamond', 2.417, 0.044, '#ffffff'],
-   ['Ruby', 1.762, 0.018, '#e8253a'],
-   ['Sapphire', 1.762, 0.018, '#1a5fd4'],
-   ['Emerald', 1.575, 0.014, '#1db85c'],
-   ['Amethyst', 1.544, 0.013, '#9b59d0'],
-   ['Topaz', 1.619, 0.014, '#f5c842'],
-   ['Spinel', 1.718, 0.020, '#ff6090'],
-   ['Zircon', 1.925, 0.039, '#b8e0ff'],
-   ['Cubic Zirconia', 2.170, 0.060, '#ffffff'],
-   ['Garnet', 1.75, 0.020, '#d32e2f'],
-   ['Tourmaline', 1.62, 0.014, '#ff7b50'],
-   ['Peridot', 1.65, 0.015, '#9fff00'],
-   ['Aquamarine', 1.57, 0.012, '#7fffd4'],
+   ['Quartz', 1.544, 0.013, '#faf7f2', '#f3f6ff', '#f5fcff'],
+   ['Diamond', 2.417, 0.044, '#ffffff', '#f7fbff', '#f6f9ff'],
+   ['Ruby', 1.762, 0.018, '#ff3d52', '#d4152f', '#ff6c86'],
+   ['Sapphire', 1.762, 0.018, '#2e5cff', '#1b3ec4', '#78a2ff'],
+   ['Emerald', 1.575, 0.014, '#22c767', '#0f8f49', '#7cf2b5'],
+   ['Amethyst', 1.544, 0.013, '#a86bff', '#6d3bc8', '#d1a7ff'],
+   ['Topaz', 1.619, 0.014, '#ffd463', '#d6a62b', '#fff0b0'],
+   ['Spinel', 1.718, 0.020, '#ff6ca2', '#cf2d70', '#ffb6d3'],
+   ['Zircon', 1.925, 0.039, '#bfe8ff', '#7ec4e8', '#e2f6ff'],
+   ['Cubic Zirconia', 2.170, 0.060, '#ffffff', '#eef5ff', '#f8fbff'],
+   ['Garnet', 1.75, 0.020, '#d94345', '#9e1f2a', '#ff8185'],
+   ['Tourmaline', 1.62, 0.014, '#ff8e63', '#e35c3b', '#ffbf9f'],
+   ['Chrome Tourmaline', 1.62, 0.017, '#25d571', '#25d571', '#11753f'],
+   ['Pink Tourmaline', 1.62, 0.017, '#ffb6d6', '#ea6aa8', '#ffd7e9'],
+   ['Iolite', 1.548, 0.017, '#ffffff', '#4c53d5', '#ffe3a2'],
+   ['Tanzanite', 1.690, 0.017, '#5f71ff', '#3f2ab0', '#d66aff'],
+   ['Peridot', 1.65, 0.015, '#a7ff28', '#6db516', '#d3ff8a'],
+   ['Aquamarine', 1.57, 0.012, '#8df6e8', '#4fbec4', '#c8fff8'],
 ];
 
 const panel = document.getElementById('gemui');
@@ -107,13 +111,18 @@ const easingFuncs = {
 const ui = {
    ri: presets[0][1],
    cod: presets[0][2],
-   clarity: 1.0,
+   clarity: 0.5,
    lightMode: 3,
    easingFuncName: Object.keys(easingFuncs)[0],
-   color: [1, 1, 1],
+   axisAColor: hexToRgb(presets[0][3]),
+   axisBColor: hexToRgb(presets[0][4]),
+   axisCColor: hexToRgb(presets[0][5]),
    backgroundColor: [13 / 255, 13 / 255, 13 / 255],
    exitHighlight: [0, 0, 0],
    headShadowColor: [0.5, 0.5, 0.5],
+   axisTiltXDeg: 0,
+   axisTiltYDeg: 0,
+   axisTiltZDeg: 0,
    exitStrength: 0.0,
    tiltAngleDeg: 10,
    focalLength: 200,
@@ -581,6 +590,15 @@ function buildUI(ui, cbs) {
    panel.querySelector('#exitColor').value = '#000000';
    panel.querySelector('#headShadowColor').value = '#ffbf66';
    ui.headShadowColor = [1.0, 0.75, 0.4];
+   panel.querySelector('#axisAColor').value = rgbToHex(ui.axisAColor);
+   panel.querySelector('#axisBColor').value = rgbToHex(ui.axisBColor);
+   panel.querySelector('#axisCColor').value = rgbToHex(ui.axisCColor);
+   panel.querySelector('#axisTiltXSlider').value = ui.axisTiltXDeg;
+   panel.querySelector('#axisTiltXVal').textContent = ui.axisTiltXDeg.toFixed(0);
+   panel.querySelector('#axisTiltYSlider').value = ui.axisTiltYDeg;
+   panel.querySelector('#axisTiltYVal').textContent = ui.axisTiltYDeg.toFixed(0);
+   panel.querySelector('#axisTiltZSlider').value = ui.axisTiltZDeg;
+   panel.querySelector('#axisTiltZVal').textContent = ui.axisTiltZDeg.toFixed(0);
    applyBodyBackground(ui);
 
    // Sync active light-mode button with ui.lightMode
@@ -688,44 +706,72 @@ function buildUI(ui, cbs) {
       cbs.onFileSelected?.(f.name, url);
    });
 
-   // --- Colour swatches ---
+   const claritySlider = panel.querySelector('#claritySlider');
+   const clarityVal = panel.querySelector('#clarityVal');
+   const axisAColorInput = panel.querySelector('#axisAColor');
+   const axisBColorInput = panel.querySelector('#axisBColor');
+   const axisCColorInput = panel.querySelector('#axisCColor');
+   const setClarityValue = (clarity) => {
+      ui.clarity = parseFloat(clarity);
+      claritySlider.value = ui.clarity;
+      clarityVal.textContent = ui.clarity.toFixed(3);
+   };
+   const setAxisColors = (aHex, bHex, cHex) => {
+      ui.axisAColor = hexToRgb(aHex);
+      ui.axisBColor = hexToRgb(bHex);
+      ui.axisCColor = hexToRgb(cHex);
+      axisAColorInput.value = aHex;
+      axisBColorInput.value = bHex;
+      axisCColorInput.value = cHex;
+   };
+   const setAxisColorsUniform = (hex) => {
+      setAxisColors(hex, hex, hex);
+   };
+
+   // --- Colour presets (apply one colour to all three axes) ---
    const gemColours = [
       '#ffffff', '#e8253a', '#1a5fd4',
       '#1db85c', '#9b59d0', '#f5c842',
       '#ff6090',
    ];
    const swatchContainer = panel.querySelector('#swatches');
-
    let activeSwatch = null;
-   gemColours.forEach(hex => {
-      const el = document.createElement('div');
-      el.className = 'swatch' + (hex === '#ffffff' ? ' active' : '');
-      el.style.background = hex;
-      el.title = hex;
-      el.addEventListener('click', () => {
-         if (activeSwatch) activeSwatch.classList.remove('active');
-         el.classList.add('active');
-         activeSwatch = el;
-         ui.color = hexToRgb(hex);
-         colorPicker.value = hex;
-         cbs.onRenderOutputChanged?.();
-      });
-      if (hex === '#ffffff') activeSwatch = el;
-      swatchContainer.appendChild(el);
-   });
 
-   // Custom colour picker
-   const colorPicker = document.createElement('input');
-   colorPicker.type = 'color';
-   colorPicker.value = '#ffffff';
-   colorPicker.title = 'Custom colour';
-   colorPicker.addEventListener('input', () => {
+   const clearSwatchActive = () => {
       if (activeSwatch) activeSwatch.classList.remove('active');
       activeSwatch = null;
-      ui.color = hexToRgb(colorPicker.value);
-      cbs.onRenderOutputChanged?.();
-   });
-   swatchContainer.appendChild(colorPicker);
+   };
+
+   if (swatchContainer) {
+      gemColours.forEach(hex => {
+         const el = document.createElement('div');
+         el.className = 'swatch';
+         el.style.background = hex;
+         el.title = hex;
+         el.addEventListener('click', () => {
+            clearSwatchActive();
+            el.classList.add('active');
+            activeSwatch = el;
+            setAxisColorsUniform(hex);
+            axisColorPresetPicker.value = hex;
+            cbs.onGraphParamsChanged?.();
+            cbs.onRenderOutputChanged?.();
+         });
+         swatchContainer.appendChild(el);
+      });
+
+      const axisColorPresetPicker = document.createElement('input');
+      axisColorPresetPicker.type = 'color';
+      axisColorPresetPicker.value = axisAColorInput.value;
+      axisColorPresetPicker.title = 'Custom colour preset';
+      axisColorPresetPicker.addEventListener('input', () => {
+         clearSwatchActive();
+         setAxisColorsUniform(axisColorPresetPicker.value);
+         cbs.onGraphParamsChanged?.();
+         cbs.onRenderOutputChanged?.();
+      });
+      swatchContainer.appendChild(axisColorPresetPicker);
+   }
 
    // --- RI slider ---
    const riSlider = panel.querySelector('#riSlider');
@@ -750,11 +796,8 @@ function buildUI(ui, cbs) {
    });
 
    // --- Clarity slider ---
-   const claritySlider = panel.querySelector('#claritySlider');
-   const clarityVal = panel.querySelector('#clarityVal');
    claritySlider.addEventListener('input', () => {
-      ui.clarity = parseFloat(claritySlider.value);
-      clarityVal.textContent = ui.clarity.toFixed(3);
+      setClarityValue(claritySlider.value);
       cbs.onGraphParamsChanged?.();
       cbs.onRenderOutputChanged?.();
    });
@@ -763,21 +806,16 @@ function buildUI(ui, cbs) {
    panel.querySelector('#gPreset').addEventListener('change', (e) => {
       const idx = parseInt(e.target.value);
       if (idx < 0) return;
-      const [, ri, cod, hex] = presets[idx];
+      const [, ri, cod, axisAHex, axisBHex, axisCHex] = presets[idx];
       ui.ri = ri;
       ui.cod = cod;
       riSlider.value = ri;
       riVal.textContent = ri.toFixed(3);
       codSlider.value = cod;
       codVal.textContent = cod.toFixed(3);
-      // Match colour swatch
-      const swatches = [...swatchContainer.querySelectorAll('.swatch')];
-      const match = swatches.find(s => s.style.background === hexToRgb(hex).toString()
-         || s.title === hex);
-      if (activeSwatch) activeSwatch.classList.remove('active');
-      if (match) { match.classList.add('active'); activeSwatch = match; }
-      ui.color = hexToRgb(hex);
-      colorPicker.value = hex;
+      setAxisColors(axisAHex, axisBHex, axisCHex);
+      clearSwatchActive();
+      setClarityValue(0.5);
       cbs.onGraphParamsChanged?.();
       cbs.onRenderOutputChanged?.();
    });
@@ -796,6 +834,51 @@ function buildUI(ui, cbs) {
 
    panel.querySelector('#headShadowColor').addEventListener('input', e => {
       ui.headShadowColor = hexToRgb(e.target.value);
+      cbs.onRenderOutputChanged?.();
+   });
+
+   axisAColorInput.addEventListener('input', e => {
+      ui.axisAColor = hexToRgb(e.target.value);
+      cbs.onGraphParamsChanged?.();
+      cbs.onRenderOutputChanged?.();
+   });
+
+   axisBColorInput.addEventListener('input', e => {
+      ui.axisBColor = hexToRgb(e.target.value);
+      cbs.onGraphParamsChanged?.();
+      cbs.onRenderOutputChanged?.();
+   });
+
+   axisCColorInput.addEventListener('input', e => {
+      ui.axisCColor = hexToRgb(e.target.value);
+      cbs.onGraphParamsChanged?.();
+      cbs.onRenderOutputChanged?.();
+   });
+
+   const axisTiltXSlider = panel.querySelector('#axisTiltXSlider');
+   const axisTiltXVal = panel.querySelector('#axisTiltXVal');
+   axisTiltXSlider.addEventListener('input', (e) => {
+      ui.axisTiltXDeg = parseFloat(e.target.value);
+      axisTiltXVal.textContent = ui.axisTiltXDeg.toFixed(0);
+      cbs.onGraphParamsChanged?.();
+      cbs.onRenderOutputChanged?.();
+   });
+
+   const axisTiltYSlider = panel.querySelector('#axisTiltYSlider');
+   const axisTiltYVal = panel.querySelector('#axisTiltYVal');
+   axisTiltYSlider.addEventListener('input', (e) => {
+      ui.axisTiltYDeg = parseFloat(e.target.value);
+      axisTiltYVal.textContent = ui.axisTiltYDeg.toFixed(0);
+      cbs.onGraphParamsChanged?.();
+      cbs.onRenderOutputChanged?.();
+   });
+
+   const axisTiltZSlider = panel.querySelector('#axisTiltZSlider');
+   const axisTiltZVal = panel.querySelector('#axisTiltZVal');
+   axisTiltZSlider.addEventListener('input', (e) => {
+      ui.axisTiltZDeg = parseFloat(e.target.value);
+      axisTiltZVal.textContent = ui.axisTiltZDeg.toFixed(0);
+      cbs.onGraphParamsChanged?.();
       cbs.onRenderOutputChanged?.();
    });
 
@@ -1125,21 +1208,13 @@ async function setupApp() {
    });
 
    // --- Uniform buffer (layout matches Uniforms struct in shaders.wgsl) ---
-   //   0:   modelMatrix       mat4  (64 b)
-   //   64:  viewMatrix        mat4  (64 b)
-   //   128: projectionMatrix  mat4  (64 b)
-   //   192: cameraPosition + pad    (16 b)
-   //   208: time / ri / cod / mode  (16 b)
-   //   224: stoneColor + graphMode  (16 b)
-   //   240: exitHighlight + str     (16 b)
-   //   256: flatShading + headShadow RGB (16 b)
    const uniformBuffer = device.createBuffer({
-      size: 288,
+      size: 320,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
    });
 
    const graphUniformBuffers = Array.from({ length: GRAPH_TILE_COUNT }, () => device.createBuffer({
-      size: 288,
+      size: 320,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
    }));
 
@@ -2742,7 +2817,7 @@ async function setupApp() {
    graphResizeObserver.observe(graphPanel);
    graphResizeObserver.observe(graphSvgEl);
 
-   const uniformScratch = new Float32Array(288 / 4);
+   const uniformScratch = new Float32Array(320 / 4);
    const invViewProjMat = mat4.create();
    const invModelMat = mat4.create();
 
@@ -4381,21 +4456,58 @@ async function setupApp() {
       out[54] = ui.cod;
       out[55] = lightMode;
 
-      out[56] = ui.color[0];
-      out[57] = ui.color[1];
-      out[58] = ui.color[2];
+      out[56] = ui.axisAColor[0];
+      out[57] = ui.axisAColor[1];
+      out[58] = ui.axisAColor[2];
       out[59] = graphMode;
 
-      out[60] = ui.exitHighlight[0];
-      out[61] = ui.exitHighlight[1];
-      out[62] = ui.exitHighlight[2];
+      out[60] = ui.axisBColor[0];
+      out[61] = ui.axisBColor[1];
+      out[62] = ui.axisBColor[2];
       out[63] = ui.exitStrength;
 
-      out[64] = flatShading;
-      out[65] = ui.headShadowColor[0];
-      out[66] = ui.headShadowColor[1];
-      out[67] = ui.headShadowColor[2];
-      out[68] = ui.convexFacetMode;
+      // 256: axisCColor vec3, 268: flatShading
+      out[64] = ui.axisCColor[0];
+      out[65] = ui.axisCColor[1];
+      out[66] = ui.axisCColor[2];
+      out[67] = flatShading;
+
+      // 272: exitHighlight vec3, 284: convexFacetMode
+      out[68] = ui.exitHighlight[0];
+      out[69] = ui.exitHighlight[1];
+      out[70] = ui.exitHighlight[2];
+      out[71] = ui.convexFacetMode;
+
+      // 288: headShadowColor vec3, 300: padding
+      out[72] = ui.headShadowColor[0];
+      out[73] = ui.headShadowColor[1];
+      out[74] = ui.headShadowColor[2];
+      out[75] = 0.0;
+
+      // Compose local-space orientation quaternion q = qz * qy * qx from slider angles.
+      let xRad = ui.axisTiltXDeg * Math.PI / 180.0;
+      let yRad = ui.axisTiltYDeg * Math.PI / 180.0;
+      let zRad = ui.axisTiltZDeg * Math.PI / 180.0;
+      let hx = 0.5 * xRad;
+      let hy = 0.5 * yRad;
+      let hz = 0.5 * zRad;
+      let sx = Math.sin(hx);
+      let cx = Math.cos(hx);
+      let sy = Math.sin(hy);
+      let cy = Math.cos(hy);
+      let sz = Math.sin(hz);
+      let cz = Math.cos(hz);
+      let qx = sx * cy * cz - cx * sy * sz;
+      let qy = cx * sy * cz + sx * cy * sz;
+      let qz = cx * cy * sz - sx * sy * cz;
+      let qw = cx * cy * cz + sx * sy * sz;
+      let qLenInv = 1.0 / Math.hypot(qx, qy, qz, qw);
+      // 304: axisQuat vec4
+      out[76] = qx * qLenInv;
+      out[77] = qy * qLenInv;
+      out[78] = qz * qLenInv;
+      out[79] = qw * qLenInv;
+
    }
 
    function writeUniformsToBuffer(buffer, modelMatrix, projectionMatrix, time, lightMode, graphMode = 0.0) {

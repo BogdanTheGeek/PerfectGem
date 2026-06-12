@@ -20,15 +20,17 @@ struct Uniforms {
     ri_d:                 f32,          // 212
     cod:                  f32,          // 216
     lightMode:            f32,          // 220
-    stoneColor:           vec3<f32>,    // 224
+    axisAColor:           vec3<f32>,    // 224
     graphMode:            f32,          // 236 (0 = normal render, >0.5 = raw graph luminance)
-    exitHighlight:        vec3<f32>,    // 240
+    axisBColor:           vec3<f32>,    // 240
     exitStrength:         f32,          // 252
-    flatShading:          f32,          // 256
-    headShadowR:          f32,          // 260
-    headShadowG:          f32,          // 264
-    headShadowB:          f32,          // 268
-    convexFacetMode:      f32,          // 272
+    axisCColor:           vec3<f32>,    // 256
+    flatShading:          f32,          // 268
+    exitHighlight:        vec3<f32>,    // 272
+    convexFacetMode:      f32,          // 284
+    headShadowColor:      vec3<f32>,    // 288
+    _pad0:                f32,          // 300
+    axisQuat:             vec4<f32>,    // 304
 };
 
 @group(0) @binding(0) var<uniform>       uniforms:  Uniforms;
@@ -91,6 +93,67 @@ fn cauchy_ri3(ri_d: f32, cod: f32) -> vec3<f32> {
     );
 }
 
+fn quat_rotate_vec3(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let t = 2.0 * cross(q.xyz, v);
+    return v + q.w * t + cross(q.xyz, t);
+}
+
+struct AxisBasis {
+    axisA: vec3<f32>,
+    axisB: vec3<f32>,
+    axisC: vec3<f32>,
+};
+
+fn axis_basis_local() -> AxisBasis {
+    var basis: AxisBasis;
+    basis.axisA = normalize(quat_rotate_vec3(uniforms.axisQuat, vec3<f32>(1.0, 0.0, 0.0)));
+    basis.axisB = normalize(quat_rotate_vec3(uniforms.axisQuat, vec3<f32>(0.0, 1.0, 0.0)));
+    basis.axisC = normalize(quat_rotate_vec3(uniforms.axisQuat, vec3<f32>(0.0, 0.0, 1.0)));
+    return basis;
+}
+
+fn clarity_clear_mix() -> f32 {
+    return clamp((uniforms.clarity - 0.5) * 2.0, 0.0, 1.0);
+}
+
+fn effective_stone_color() -> vec3<f32> {
+    let mixed = (uniforms.axisAColor + uniforms.axisBColor + uniforms.axisCColor) / 3.0;
+    return mix(mixed, vec3<f32>(1.0), clarity_clear_mix());
+}
+
+fn trichroic_tint(dir_local: vec3<f32>, basis: AxisBasis) -> vec3<f32> {
+    let clearMix = clarity_clear_mix();
+    let d = normalize(dir_local);
+    let wa = abs(dot(d, basis.axisA));
+    let wb = abs(dot(d, basis.axisB));
+    let wc = abs(dot(d, basis.axisC));
+    let sumW = max(wa + wb + wc, 1e-5);
+    let baseTint = (uniforms.axisAColor * wa + uniforms.axisBColor * wb + uniforms.axisCColor * wc) / sumW;
+    return mix(baseTint, vec3<f32>(1.0), clearMix);
+}
+
+fn apply_clarity_color_grade(baseColor: vec3<f32>, clarity: f32) -> vec3<f32> {
+    let c = clamp(clarity, 0.0, 1.0);
+    let t = (c - 0.5) * 2.0; // -1..1, 0 = neutral
+    let luma = dot(baseColor, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let gray = vec3<f32>(luma);
+    let clear = vec3<f32>(1.0);
+
+    let rich = max(0.0, -t);
+    let wash = max(0.0, t);
+
+    // Below midpoint: richer saturation + lower luminance.
+    let lowSat = 1.0 + rich * 1.25;
+    let lowLum = 1.0 - rich * 0.50;
+    let lowColor = (gray + (baseColor - gray) * lowSat) * lowLum;
+
+    // Above midpoint: lose color toward clear/white.
+    let highColor = mix(baseColor, clear, wash);
+
+    let graded = select(lowColor, highColor, t >= 0.0);
+    return max(graded, vec3<f32>(0.0));
+}
+
 // ─────────────────────────────────────────────────
 // Hash for RND sky — smooth bilinear patch grid
 // matching raytracer's npatch=17 random sky array
@@ -132,7 +195,7 @@ fn sample_env_view(dirView: vec3<f32>) -> vec3<f32> {
             shadowTint = vec3<f32>(0.0, 0.0, 0.0);
         }
         else {
-            shadowTint = vec3<f32>(uniforms.headShadowR, uniforms.headShadowG, uniforms.headShadowB);
+            shadowTint = uniforms.headShadowColor;
         }
     }
 
@@ -173,11 +236,7 @@ fn sample_env_view(dirView: vec3<f32>) -> vec3<f32> {
 
     // Stone colour tint — modulates transmitted light so the body colour
     // of coloured gems (ruby, sapphire, emerald) comes through correctly.
-    let tint = select(
-        vec3<f32>(1.0),
-        uniforms.stoneColor,
-        !graph,
-    );
+    let tint = effective_stone_color();
 
     // Small white ambient from below (light table / bench lamp)
     // Matches the raytracer's background "leak" colour
@@ -390,7 +449,7 @@ struct TraceResult {
 // for all common gem materials (Δangle < 0.5° even for high-dispersion CZ).
 fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
                   origin_in: vec3<f32>, eta: vec3<f32>,
-                  mvMatrix: mat4x4<f32>, modelNZ: vec3<f32>) -> TraceResult {
+                  mvMatrix: mat4x4<f32>, modelNZ: vec3<f32>, axisBasis: AxisBasis) -> TraceResult {
     var r      = rd_r;
     var g      = rd_g;
     var b      = rd_b;
@@ -419,7 +478,7 @@ fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
             //     sample_env_view((mvMatrix * vec4<f32>(b, 0.0)).xyz).b,
             // );
             let envSample = sample_env_view((mvMatrix * vec4<f32>(g, 0.0)).xyz);
-            accumulated += throughput * envSample;
+            accumulated += throughput * envSample * trichroic_tint(g, axisBasis);
             break;
         }
 
@@ -431,10 +490,10 @@ fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
 
         if (hit.frosted > 0.5) {
             let n_world = normalize((uniforms.modelMatrix * vec4<f32>(n, 0.0)).xyz);
-            let glow = mix(vec3<f32>(0.82, 0.84, 0.86), uniforms.stoneColor, 0.30);
+            let glow = mix(vec3<f32>(0.82, 0.84, 0.86), effective_stone_color(), 0.30);
             let diffuse = max(0.0, n_world.z);
             let refl = reflect(g, n);
-            let reflected = sample_env_view((mvMatrix * vec4<f32>(refl, 0.0)).xyz) * mix(vec3<f32>(1.0), uniforms.stoneColor, 0.18) * 0.32;
+            let reflected = sample_env_view((mvMatrix * vec4<f32>(refl, 0.0)).xyz) * mix(vec3<f32>(1.0), effective_stone_color(), 0.18) * 0.32;
             accumulated += throughput * (glow * (0.54 + 0.24 * diffuse) + reflected);
             break;
         }
@@ -461,13 +520,19 @@ fn trace_internal(rd_r: vec3<f32>, rd_g: vec3<f32>, rd_b: vec3<f32>,
         // Refracted escape contribution per channel
         // length() guard is redundant: refract() is only called when st < 1 (no TIR)
         if (st.x < 1.0) {
-            accumulated.x += throughput.x * sample_env_view((mvMatrix * vec4<f32>(refract(r, n, eta.x), 0.0)).xyz).r * (1.0 - fresnel.x);
+            let refr_r = refract(r, n, eta.x);
+            let tint_r = trichroic_tint(refr_r, axisBasis);
+            accumulated.x += throughput.x * sample_env_view((mvMatrix * vec4<f32>(refr_r, 0.0)).xyz).r * tint_r.x * (1.0 - fresnel.x);
         }
         if (st.y < 1.0) {
-            accumulated.y += throughput.y * sample_env_view((mvMatrix * vec4<f32>(refract(g, n, eta.y), 0.0)).xyz).g * (1.0 - fresnel.y);
+            let refr_g = refract(g, n, eta.y);
+            let tint_g = trichroic_tint(refr_g, axisBasis);
+            accumulated.y += throughput.y * sample_env_view((mvMatrix * vec4<f32>(refr_g, 0.0)).xyz).g * tint_g.y * (1.0 - fresnel.y);
         }
         if (st.z < 1.0) {
-            accumulated.z += throughput.z * sample_env_view((mvMatrix * vec4<f32>(refract(b, n, eta.z), 0.0)).xyz).b * (1.0 - fresnel.z);
+            let refr_b = refract(b, n, eta.z);
+            let tint_b = trichroic_tint(refr_b, axisBasis);
+            accumulated.z += throughput.z * sample_env_view((mvMatrix * vec4<f32>(refr_b, 0.0)).xyz).b * tint_b.z * (1.0 - fresnel.z);
         }
 
         // Advance origin along green ray; reflect all three channels
@@ -498,7 +563,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var N_world = normalize(input.worldNormal);
     let graph = uniforms.graphMode > 0.5;
 
-    let stoneColor = select(vec3<f32>(1.0), uniforms.stoneColor, !graph);
+    let stoneColor = effective_stone_color();
 
     let isFrontFace = dot(V_world, N_world) < 0.0;
     if (!isFrontFace) { N_world = -N_world; }
@@ -548,6 +613,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let mCol2   = uniforms.modelMatrix[2].xyz;
     let V_local = normalize(vec3<f32>(dot(V_world, mCol0), dot(V_world, mCol1), dot(V_world, mCol2)));
     let N_local = normalize(vec3<f32>(dot(N_world, mCol0), dot(N_world, mCol1), dot(N_world, mCol2)));
+    let axisBasis = axis_basis_local();
     let faceDx = dpdx(input.localPos);
     let faceDy = dpdy(input.localPos);
     let faceN = normalize(cross(faceDx, faceDy));
@@ -578,7 +644,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let fresnel = f0 + (1.0 - f0) * pow(1.0 - max(0.0, dot(-V_world, N_world)), 5.0);
 
     let refl_dir   = reflect(V_world, N_world);
-    let reflection = sample_env(refl_dir) * fresnel;
+    let refl_local = normalize(vec3<f32>(dot(refl_dir, mCol0), dot(refl_dir, mCol1), dot(refl_dir, mCol2)));
+    let reflection = sample_env(refl_dir) * fresnel * trichroic_tint(refl_local, axisBasis);
 
     let refr_rd_r = refract(V_local, N_local, 1.0 / ri_r);
     let refr_rd_g = refract(V_local, N_local, 1.0 / ri_g);
@@ -590,16 +657,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let modelNZ  = vec3<f32>(uniforms.modelMatrix[0][2], uniforms.modelMatrix[1][2], uniforms.modelMatrix[2][2]);
 
     let entry = input.localPos;
-    let tr    = trace_internal(refr_rd_r, refr_rd_g, refr_rd_b, entry, ri, mvMatrix, modelNZ);
+    let tr    = trace_internal(refr_rd_r, refr_rd_g, refr_rd_b, entry, ri, mvMatrix, modelNZ, axisBasis);
 
-    let clarity = uniforms.clarity;
-    // Beer-Lambert: Clarity 1.0 = clear, 0.0 = opaque/dark
-    let absorptionFactor = (1.0 - clarity) * 1.0;
-    let transmission = exp(-absorptionFactor * tr.dist);
+    let clarity = clamp(uniforms.clarity, 0.0, 1.0);
+    let clarityTint = apply_clarity_color_grade(stoneColor, clarity);
 
+    // Below midpoint, accumulate color density with path length (darker/richer).
+    let colorDensity = max(0.0, (0.5 - clarity) * 2.0);
+    let transmission = exp(-colorDensity * tr.dist);
 
-    // Apply to the internal light and window leakage
-    let finalInternalLight = tr.light * transmission * stoneColor;
+    // Apply graded color and density to internal light.
+    let finalInternalLight = tr.light * transmission * clarityTint;
     let baseColor = reflection + finalInternalLight * (1.0 - fresnel);
 
     // Dedicated graph mode: emit raw pre-tonemap luminance directly.
