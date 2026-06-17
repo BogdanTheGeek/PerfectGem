@@ -1,7 +1,6 @@
 "use strict";
 
 import {
-   isNegativeZero as geometryIsNegativeZero,
    isFlatFacetAngleDeg as geometryIsFlatFacetAngleDeg,
    resolveFlatFacetNormalZ as geometryResolveFlatFacetNormalZ,
    computeNormalFromPolar as geometryComputeNormalFromPolar,
@@ -21,11 +20,6 @@ if (typeof window === 'undefined') {
 const TABLE_FACET_MAX_ANGLE_DEG = 1.5;
 const EPS = 1e-9;
 const VERTEX_EPS = 1e-6;
-const FLAT_FACET_ANGLE_EPS_DEG = 1e-8;
-
-function isNegativeZero(value) {
-   return geometryIsNegativeZero(value);
-}
 
 function isFlatFacetAngleDeg(angleDeg) {
    return geometryIsFlatFacetAngleDeg(angleDeg);
@@ -178,6 +172,8 @@ async function loadGCS(data) {
    for (const tierEl of doc.getElementsByTagName('tier')) {
       const tierName = (tierEl.getAttribute('name') || '').trim();
       const tierInst = (tierEl.getAttribute('instructions') || '').trim();
+      const normalized = normalizeFacetMetadata(tierName, tierInst);
+      const depth = parseFloat(tierEl.getAttribute('depth') || '0');
 
       for (const facetEl of tierEl.getElementsByTagName('facet')) {
          const nx = parseFloat(facetEl.getAttribute('nx') || '0');
@@ -188,7 +184,18 @@ async function loadGCS(data) {
          const normal = [nx / len, ny / len, nz / len];
 
          const vertEls = facetEl.getElementsByTagName('vertex');
-         if (vertEls.length < 3) continue;
+         if (vertEls.length < 3) {
+            // must be preform, check for depth
+            facets.push({
+               name: normalized.name,
+               instructions: normalized.instructions,
+               frosted: normalized.frosted,
+               normal,
+               d: depth,
+               triangleCount: 0,
+            });
+            continue;
+         }
 
          // GCS vertices are in CW order from outside — swap v1↔v2 in the fan
          // to restore CCW (front-face) winding. No Y-flip needed: GCS uses the
@@ -198,23 +205,25 @@ async function loadGCS(data) {
             parseFloat(v.getAttribute('y') || '0'),
             parseFloat(v.getAttribute('z') || '0'),
          ]);
-         const planeDistanceSamples = verts.map(([x, y, z]) => x * normal[0] + y * normal[1] + z * normal[2]);
-         const finitePlaneDistanceSamples = planeDistanceSamples.filter((value) => Number.isFinite(value));
-         const meanPlaneDistance = finitePlaneDistanceSamples.length
-            ? (finitePlaneDistanceSamples.reduce((sum, value) => sum + value, 0) / finitePlaneDistanceSamples.length)
-            : null;
-         const facetDistance = Number.isFinite(meanPlaneDistance) ? Math.abs(meanPlaneDistance) : null;
 
-         const normalized = normalizeFacetMetadata(tierName, tierInst);
+         let facetDistance = depth;
+         if (facetDistance === 0) {
+            const planeDistanceSamples = verts.map(([x, y, z]) => x * normal[0] + y * normal[1] + z * normal[2]);
+            const finitePlaneDistanceSamples = planeDistanceSamples.filter((value) => Number.isFinite(value));
+            const meanPlaneDistance = finitePlaneDistanceSamples.length
+               ? (finitePlaneDistanceSamples.reduce((sum, value) => sum + value, 0) / finitePlaneDistanceSamples.length)
+               : null;
+            facetDistance = Number.isFinite(meanPlaneDistance) ? Math.abs(meanPlaneDistance) : null;
+         }
 
          const triangleCount = verts.length - 2;
+
          facets.push({
             name: normalized.name,
             instructions: normalized.instructions,
             frosted: normalized.frosted,
             normal,
             d: facetDistance,
-            vertexCount: verts.length,
             triangleCount,
          });
 
@@ -651,7 +660,6 @@ function buildStoneFromHalfSpacePlanes(planes, refractiveIndex = null, sourceGea
          frosted: Boolean(p.frosted),
          normal: [p.a, p.b, p.c],
          d: p.d,
-         vertexCount: verts.length,
          triangleCount,
       });
 
@@ -1239,7 +1247,6 @@ async function loadGEM(buffer) {
          frosted: Boolean(p.frosted),
          normal: [nx, -ny, nz],
          d: p.d,
-         vertexCount: verts.length,
          triangleCount,
       });
 
@@ -1721,7 +1728,8 @@ function getFacetDistanceValue(facet) {
 
 const makeKeyFromFacet = (facet) => {
    const angle = computeSignedFacetAngleDeg(facet.normal);
-   const angleKey = angle.toFixed(2);
+   const is90Deg = Math.abs(angle) > 89.999;
+   const angleKey = is90Deg ? Math.abs(angle.toFixed(2)) : angle.toFixed(2);
    const name = String(facet?.name || '').trim();
    const dKey = Number.isFinite(facet?.d) ? Math.abs(facet.d).toFixed(4) : 'NaN';
    // const section = getFacetSection(angle);
