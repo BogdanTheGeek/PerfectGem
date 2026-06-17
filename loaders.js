@@ -30,7 +30,7 @@ function resolveFlatFacetNormalZ(angleDeg, distance) {
 }
 
 class StoneData {
-   constructor(vertexData, triangleCount, facets = [], refractiveIndex = null, dispersion = null, sourceGear, metadata = {}) {
+   constructor(vertexData, triangleCount, facets = [], refractiveIndex = null, dispersion = null, sourceGear, metadata = {}, preform = []) {
       this.vertexData = vertexData;
       this.triangleCount = triangleCount;
       this.facets = facets;
@@ -38,6 +38,7 @@ class StoneData {
       this.dispersion = dispersion;
       this.sourceGear = sourceGear;
       this.metadata = metadata;
+      this.preform = Array.isArray(preform) ? preform : [];
       // console.debug('StoneData created:', this);
    }
 }
@@ -286,8 +287,8 @@ function buildFacetInfo(stone, summary = null) {
    if (!summary) {
       summary = computeFacetNotesSummary(stone);
    }
-   const groupedSections = groupFacetInfo(facets, summary.gearUsed);
-   const sectionOrder = ['PAVILION', 'CROWN', 'OTHER'];
+   const groupedSections = groupFacetInfo(facets, summary.gearUsed, stone.preform);
+   const sectionOrder = ['PREFORM', 'PAVILION', 'CROWN', 'OTHER'];
    const html = [];
 
    for (const sectionName of sectionOrder) {
@@ -645,13 +646,28 @@ function buildStoneFromHalfSpacePlanes(planes, refractiveIndex = null, sourceGea
 
    const triangles = [];
    const facets = [];
+   const preform = [];
 
 
    for (let pi = 0; pi < n; pi++) {
       const verts = orderFacetVerts(pi, facetVerts[pi], planes, allVerts);
-      if (verts.length < 3) continue;
-
       const p = planes[pi];
+      if (verts.length < 3) {
+         preform.push({
+            index: pi + 1,
+            name: p.name || '',
+            instructions: p.instructions || '',
+            frosted: Boolean(p.frosted),
+            normal: [p.a, p.b, p.c],
+            d: p.d,
+            triangleCount: 0,
+            sourceFacetOrder: Number.isFinite(Number(p.facetOrder)) ? Number(p.facetOrder) : -1,
+            sourceGearIndex: Number.isFinite(Number(p.index)) ? Number(p.index) : null,
+            isReference: true,
+         });
+         continue;
+      }
+
       const triangleCount = verts.length - 2;
       facets.push({
          index: pi + 1,
@@ -721,7 +737,7 @@ function buildStoneFromHalfSpacePlanes(planes, refractiveIndex = null, sourceGea
       }
    }
 
-   return new StoneData(vertexData, triCount, facets, refractiveIndex, null, sourceGear, metadata);
+   return new StoneData(vertexData, triCount, facets, refractiveIndex, null, sourceGear, metadata, preform);
 }
 
 function stretchStoneByVertices(stone, scaleFactor, crown = true) {
@@ -1583,35 +1599,49 @@ function getFacetSection(angle, normal = null) {
    return 'CROWN';
 }
 
-function groupFacetInfo(facets = [], gear) {
+function groupFacetInfo(facets = [], gear, preform = []) {
    const sections = new Map([
+      ['PREFORM', []],
       ['PAVILION', []],
       ['CROWN', []],
       ['OTHER', []],
    ]);
    const grouped = new Map();
 
-   for (const facet of facets) {
+   function makeEntry(facet, section) {
       const name = (facet.name || '').trim() || '?';
       const instructions = (facet.instructions || '').trim();
       const angle = computeSignedFacetAngleDeg(facet.normal);
       const angleLabel = Math.abs(angle).toFixed(2);
+      return {
+         ...facet,
+         section,
+         name,
+         angle,
+         angleLabel: `${angleLabel}°`,
+         indexes: [],
+         instructions,
+      };
+   }
+
+   for (const facet of preform) {
+      const key = makeKeyFromFacet(facet);
+      if (!grouped.has(key)) {
+         const entry = makeEntry(facet, 'PREFORM');
+         grouped.set(key, entry);
+         sections.get('PREFORM').push(entry);
+      }
+   }
+
+   for (const facet of facets) {
       const key = makeKeyFromFacet(facet);
       let entry = grouped.get(key);
       if (!entry) {
-         entry = {
-            ...facet,
-            section: getFacetSection(angle, facet.normal),
-            name,
-            angle,
-            angleLabel: `${angleLabel}°`,
-            indexes: [],
-            instructions,
-         };
+         entry = makeEntry(facet, getFacetSection(computeSignedFacetAngleDeg(facet.normal), facet.normal));
          grouped.set(key, entry);
-         sections.get(entry.section)?.push(entry);
-      } else if ((entry.name === '?' || !entry.name) && name !== '?') {
-         const nextSection = getFacetSection(angle, facet.normal);
+         sections.get(entry.section).push(entry);
+      } else if ((entry.name === '?' || !entry.name) && (facet.name || '').trim() !== '?') {
+         const nextSection = getFacetSection(computeSignedFacetAngleDeg(facet.normal), facet.normal);
          if (entry.section !== nextSection) {
             const currentEntries = sections.get(entry.section);
             const currentIndex = currentEntries?.indexOf(entry) ?? -1;
@@ -1619,8 +1649,9 @@ function groupFacetInfo(facets = [], gear) {
             sections.get(nextSection)?.push(entry);
             entry.section = nextSection;
          }
-         entry.name = name;
+         entry.name = (facet.name || '').trim() || '?';
       }
+
       entry.indexes.push(computeFacetGearIndex(facet.normal, gear));
    }
 
@@ -1903,9 +1934,8 @@ function normalizeDesignFacet(inputFacet = {}, fallbackIndex = 0) {
    return next;
 }
 
-// Generate polygonal faces (ordered vertices, normal and angles) from
-// a list of design-style facets (as produced by groupExternalFacetsForDesign
-// or similar). Returns an array of faces: { name, instructions, normal, vertices:[ [x,y,z], ... ], angleDeg, signedAngleDeg, azimuthDeg }
+// Generate polygonal faces plus metadata-only reference facets (no visible vertices)
+// from design-style facets.
 function generateFacesFromFacetList(facetList = [], gear = 96) {
 
    const normalizedInput = (facetList || []).map((f, i) => normalizeDesignFacet(f, i));
@@ -1965,7 +1995,7 @@ function generateFacesFromFacetList(facetList = [], gear = 96) {
       }
    }
 
-   if (!planes.length) return [];
+   if (!planes.length) return { faces: [], preform: [] };
 
    // Normalize plane coefficients
    for (const p of planes) {
@@ -1996,6 +2026,8 @@ function generateFacesFromFacetList(facetList = [], gear = 96) {
       }
    }
 
+   // Facets without resulting polygon vertices are preserved as reference facets.
+
    // Flip plane normals if centroid violates half-space (match orientation used elsewhere)
    if (allVerts.length) {
       let cx = 0, cy = 0, cz = 0;
@@ -2010,12 +2042,43 @@ function generateFacesFromFacetList(facetList = [], gear = 96) {
    }
 
    const faces = [];
+   const preform = [];
    for (let pi = 0; pi < n; pi++) {
+      const p = planes[pi];
       const ordered = orderFacetVerts(pi, facetVerts[pi], planes, allVerts);
-      if (!ordered || ordered.length < 3) continue;
+      if (!ordered || ordered.length < 3) {
+         const refNormal = [p.a, p.b, p.c];
+         const refAngleDeg = computeFacetAngleDeg(refNormal);
+         const refSignedAngleDeg = computeSignedFacetAngleDeg(refNormal);
+         const refAzimuth = (Math.atan2(refNormal[0], -refNormal[1]) * 180 / Math.PI) || 0;
+         const refAzimuthDeg = ((refAzimuth % 360) + 360) % 360;
+         let refIndexAngle = refAzimuthDeg;
+         if (Number.isFinite(Number(p.index))) {
+            const idx = Number(p.index);
+            const step = 360 / Math.max(1, gear);
+            let base = (idx * step) % 360;
+            if (refSignedAngleDeg < 0 && Math.abs(refAngleDeg) < 89) base = (360 - base) % 360;
+            refIndexAngle = base < 0 ? base + 360 : base;
+         }
+         preform.push({
+            name: p.name || '',
+            instructions: p.instructions || '',
+            frosted: Boolean(p.frosted),
+            normal: refNormal,
+            d: p.d,
+            angleDeg: refAngleDeg,
+            signedAngleDeg: refSignedAngleDeg,
+            azimuthDeg: refAzimuthDeg,
+            indexAngle: refIndexAngle,
+            sourceFacetOrder: Number.isFinite(Number(p.facetOrder)) ? Number(p.facetOrder) : -1,
+            sourceGearIndex: Number.isFinite(Number(p.index)) ? Number(p.index) : null,
+            triangleCount: 0,
+            isReference: true,
+         });
+         continue;
+      }
       let verts = ordered.map(vi => allVerts[vi]);
       if (FORCE_REVERSE_WINDING) verts = verts.reverse();
-      const p = planes[pi];
       const n = [p.a, p.b, p.c];
       const angleDeg = computeFacetAngleDeg(n);
       const isGirdle = Math.abs(angleDeg) >= 89;
@@ -2065,7 +2128,7 @@ function generateFacesFromFacetList(facetList = [], gear = 96) {
       faces.push(faceObj);
    }
 
-   return faces;
+   return { faces, preform };
 }
 
 function buildDesignGcsText(definition = {}) {
@@ -2101,7 +2164,7 @@ function buildDesignGcsText(definition = {}) {
 
    const tierXml = [];
    const normalizedFacets = facets.map((f, i) => normalizeDesignFacet(f, i));
-   const faces = generateFacesFromFacetList(facets, gear);
+   const { faces, preform } = generateFacesFromFacetList(facets, gear);
    const groups = new Map();
    for (const face of faces) {
       const sourceOrder = Number.isFinite(Number(face.sourceFacetOrder)) ? Number(face.sourceFacetOrder) : Number.MAX_SAFE_INTEGER;
@@ -2117,6 +2180,23 @@ function buildDesignGcsText(definition = {}) {
       groups.get(key).faces.push(face);
    }
 
+   for (const facet of preform) {
+      const sourceOrder = Number.isFinite(Number(facet.sourceFacetOrder)) ? Number(facet.sourceFacetOrder) : Number.MAX_SAFE_INTEGER;
+      const key = `${sourceOrder}\u0000${facet.name}\u0000${facet.instructions}`;
+      if (!groups.has(key)) {
+         groups.set(key, {
+            sourceOrder,
+            name: facet.name || '',
+            instructions: facet.instructions || '',
+            faces: [],
+            preform: [],
+         });
+      }
+      const group = groups.get(key);
+      if (!Array.isArray(group.preform)) group.preform = [];
+      group.preform.push(facet);
+   }
+
    const orderedGroups = [...groups.values()].sort((a, b) => {
       if (a.sourceOrder !== b.sourceOrder) return a.sourceOrder - b.sourceOrder;
       const nameCmp = String(a.name).localeCompare(String(b.name));
@@ -2124,7 +2204,7 @@ function buildDesignGcsText(definition = {}) {
       return String(a.instructions).localeCompare(String(b.instructions));
    });
 
-   for (const { sourceOrder, name, instructions, faces: grpFaces } of orderedGroups) {
+   for (const { sourceOrder, name, instructions, faces: grpFaces, preform: grpRefs = [] } of orderedGroups) {
       grpFaces.sort((a, b) => {
          const ia = a.sourceGearIndex;
          const ib = b.sourceGearIndex;
@@ -2136,12 +2216,15 @@ function buildDesignGcsText(definition = {}) {
       const source = normalizedFacets[sourceOrder]
          || normalizedFacets.find(f => String((f.name || '')).trim() === String((name || '')).trim() && String((f.instructions || '')).trim() === String((instructions || '')).trim())
          || null;
-      const angleAttr = source && source.angleDeg ? source.angleDeg : (grpFaces[0]?.signedAngleDeg ?? 0);
+      const angleAttr = source && source.angleDeg ? source.angleDeg : (grpFaces[0]?.signedAngleDeg ?? grpRefs[0]?.signedAngleDeg ?? 0);
       let depthAttr = source && source.distance ? source.distance : null;
       if (!Number.isFinite(depthAttr) && grpFaces[0] && Array.isArray(grpFaces[0].vertices) && grpFaces[0].vertices.length) {
          const n0 = grpFaces[0].normal || [0, 0, 1];
          const v0 = grpFaces[0].vertices[0];
          depthAttr = Math.abs((n0[0] * v0[0]) + (n0[1] * v0[1]) + (n0[2] * v0[2]));
+      }
+      if (!Number.isFinite(depthAttr) && grpRefs[0] && Number.isFinite(Number(grpRefs[0].d))) {
+         depthAttr = Math.abs(Number(grpRefs[0].d));
       }
       const visibleAttr = source && typeof source.visible !== 'undefined' ? Boolean(source.visible) : true;
       const guideAttr = source && typeof source.guide !== 'undefined' ? Boolean(source.guide) : false;
@@ -2164,11 +2247,20 @@ function buildDesignGcsText(definition = {}) {
          const idxAngleStr = fmt(rawIdxAngle);
          return `\n        <facet nx="${fmt(outNormal[0])}" ny="${fmt(outNormal[1])}" nz="${fmt(outNormal[2])}" index_angle="${idxAngleStr}">\n${vertsXml}\n        </facet>`;
       }).join('');
-      if (facetXml) {
+      const refFacetXml = grpRefs.map((refFacet) => {
+         const normal = normalizeVec(refFacet.normal || [0, 0, 1]);
+         const rawIdxAngle = Number.isFinite(Number(refFacet.indexAngle))
+            ? Number(refFacet.indexAngle)
+            : (Number.isFinite(Number(refFacet.azimuthDeg)) ? Number(refFacet.azimuthDeg) : 0);
+         const idxAngleStr = fmt(rawIdxAngle);
+         return `\n        <facet nx="${fmt(normal[0])}" ny="${fmt(normal[1])}" nz="${fmt(normal[2])}" index_angle="${idxAngleStr}"/>`;
+      }).join('');
+      const tierBody = `${facetXml}${refFacetXml}`;
+      if (tierBody) {
          const angleForXml = (Number(angleAttr) < 0) ? (180 + Number(angleAttr)) : Number(angleAttr);
          const angleStr = fmt(angleForXml);
          const depthStr = fmt(depthAttr ?? 0);
-         tierXml.push(`    <tier angle="${angleStr}" depth="${depthStr}" name="${escapeXML(name)}" instructions="${escapeXML(instructions)}" visible="${visibleAttr ? 'true' : 'false'}" guide="${guideAttr ? 'true' : 'false'}">${facetXml}\n  </tier>`);
+         tierXml.push(`    <tier angle="${angleStr}" depth="${depthStr}" name="${escapeXML(name)}" instructions="${escapeXML(instructions)}" visible="${visibleAttr ? 'true' : 'false'}" guide="${guideAttr ? 'true' : 'false'}">${tierBody}\n  </tier>`);
       }
    }
 

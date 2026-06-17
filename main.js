@@ -949,7 +949,9 @@ function buildUI(ui, cbs) {
          metadata: getMetadataFromDesign(),
       };
       const stone = buildStoneFromFacetDesign(designDefinition);
-      const faces = generateFacesFromFacetList(designDefinition.facets, gear);
+      const facesList = generateFacesFromFacetList(designDefinition.facets, gear);
+      const faces = facesList.faces;
+      stone.preform = facesList.preform;
       const summary = computeFacetNotesSummary(stone);
       const summaryHtml = buildFacetInfo(stone, summary);
       const size = 500;
@@ -3242,7 +3244,8 @@ async function setupApp() {
          : groupExternalFacetsForDesign(Array.isArray(stone.facets) ? stone.facets : [], pickGear);
       let faces = buildFallbackFacesFromStoneMesh(stone, sourceFacetList);
       if (!Array.isArray(faces) || faces.length === 0) {
-         faces = generateFacesFromFacetList(sourceFacetList, pickGear);
+         const facesList = generateFacesFromFacetList(sourceFacetList, pickGear);
+         faces = facesList.faces;
       }
       if (!Array.isArray(faces) || faces.length === 0) return;
 
