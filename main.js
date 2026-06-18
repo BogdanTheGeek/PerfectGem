@@ -235,6 +235,8 @@ const designSizePEl = document.getElementById('designSizeP');
 const designSizeCEl = document.getElementById('designSizeC');
 const designSizeUEl = document.getElementById('designSizeU');
 const designSizeTEl = document.getElementById('designSizeT');
+const designSizeGValueEl = document.getElementById('designSizeGValue');
+const designSizeHEl = document.getElementById('designSizeH');
 const designSizeCalcStatusEl = document.getElementById('designSizeCalcStatus');
 let graphCanvasWidth = 388;
 let graphCanvasHeight = 220;
@@ -1391,6 +1393,7 @@ async function setupApp() {
       setDesignSizeValue(designSizeCEl, NaN);
       setDesignSizeValue(designSizeUEl, NaN);
       setDesignSizeValue(designSizeTEl, NaN);
+      setDesignSizeValue(designSizeHEl, NaN);
       designSizeOverlayWidthMm = null;
    }
 
@@ -1412,6 +1415,11 @@ async function setupApp() {
          return { ok: false, message: 'Enter positive W or L value in mm.' };
       }
 
+      const girdleMm = parseFloat(designSizeGValueEl?.value ?? '');
+      if (!Number.isFinite(girdleMm) || girdleMm < 0) {
+         return { ok: false, message: 'Enter non-negative G value in mm.' };
+      }
+
       const widthMm = driverType === 'L'
          ? driverValue / summary.lw
          : driverValue;
@@ -1429,6 +1437,7 @@ async function setupApp() {
          crownMm: summary.cw * widthMm,
          upperMm: summary.uw * widthMm,
          tableMm: summary.tw * widthMm,
+         heightMm: summary.cw * widthMm + summary.pw * widthMm + girdleMm,
       };
    }
 
@@ -1447,6 +1456,7 @@ async function setupApp() {
       setDesignSizeValue(designSizeCEl, result.crownMm);
       setDesignSizeValue(designSizeUEl, result.upperMm);
       setDesignSizeValue(designSizeTEl, result.tableMm);
+      setDesignSizeValue(designSizeHEl, result.heightMm);
       designSizeOverlayWidthMm = result.widthMm;
       setDesignSizeCalculatorStatus(`Solved from ${result.driverType} = ${result.driverValue.toFixed(3)} mm`);
    }
@@ -5181,6 +5191,7 @@ async function setupApp() {
 
    designSizeDriverTypeEl?.addEventListener('change', refreshDesignSizeCalculator);
    designSizeDriverValueEl?.addEventListener('input', refreshDesignSizeCalculator);
+   designSizeGValueEl?.addEventListener('input', refreshDesignSizeCalculator);
    refreshDesignSizeCalculator();
 
    let suspendScaleAdjust = false;
