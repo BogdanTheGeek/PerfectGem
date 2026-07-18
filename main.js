@@ -21,6 +21,7 @@ import {
    buildDesignGcsText,
    buildDesignAscText,
    buildDesignGemBuffer,
+   buildDesignStlBuffer,
 } from './loaders.js';
 import {
    computeFacetNormalFromParams,
@@ -2355,7 +2356,7 @@ async function setupApp() {
       if (('showSaveFilePicker' in window) === false) {
          const baseName = currentModelFilename.replace(/\.[^.]+$/, '') || 'design';
          const currentExt = (String(currentModelFilename).split('.').pop() || '').toLowerCase();
-         const fallbackExt = currentExt === 'asc' || currentExt === 'gcs' ? currentExt : 'gem';
+         const fallbackExt = currentExt === 'asc' || currentExt === 'gcs' || currentExt === 'stl' ? currentExt : 'gem';
          let outName = `${baseName}.${fallbackExt}`;
          let blob = null;
          if (fallbackExt === 'asc') {
@@ -2364,6 +2365,9 @@ async function setupApp() {
          } else if (fallbackExt === 'gcs') {
             const gcsText = buildDesignGcsText(exportDefinition);
             blob = new Blob([gcsText], { type: 'application/xml' });
+         } else if (fallbackExt === 'stl') {
+            const stlBuffer = buildDesignStlBuffer(exportDefinition);
+            blob = new Blob([stlBuffer], { type: 'model/stl' });
          } else {
             const gemBuffer = buildDesignGemBuffer(exportDefinition);
             outName = `${baseName}.gem`;
@@ -2397,6 +2401,10 @@ async function setupApp() {
                   description: 'GemCad ASCII Design (ASC) File',
                   accept: { 'text/plain': ['.asc'] },
                },
+               {
+                  description: 'STL Mesh File',
+                  accept: { 'model/stl': ['.stl'] },
+               },
             ],
          });
 
@@ -2406,6 +2414,9 @@ async function setupApp() {
          let content = "";
          if (extension === 'gcs') {
             content = buildDesignGcsText(exportDefinition);
+         }
+         else if (extension === 'stl') {
+            content = buildDesignStlBuffer(exportDefinition);
          }
          else if (extension === 'gem') {
             content = buildDesignGemBuffer(exportDefinition);

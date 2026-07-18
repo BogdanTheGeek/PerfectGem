@@ -5,7 +5,7 @@ Check it out here: https://bogdanthegeek.github.io/PerfectGem/
 
 ## Features
 - Works on desktop(WebGL supported Browsers) and mobile(Android and iOS).
-- Import and export .asc, .gem, and .gcs designs[^1]
+- Import and export .asc, .gem, .stl, and .gcs designs[^1]
 - Adjust stone colour, RI, dispersion etc.
 - Adjust focal length and internal resolution.
 - Performance graphs for ISO, COS, SC2.

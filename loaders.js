@@ -2375,6 +2375,57 @@ function buildDesignGemBuffer(definition = {}) {
    return convertGCSTextToGEMBuffer(buildDesignGcsText(definition));
 }
 
+function stoneToBinaryStlBuffer(stone = {}) {
+   const trianglesFromStone = Math.max(0, parseInt(stone?.triangleCount, 10) || 0);
+   const vertexData = (stone?.vertexData instanceof Float32Array) ? stone.vertexData : null;
+   const floatsPerTriangle = 3 * 7;
+   const trianglesFromBuffer = vertexData ? Math.floor(vertexData.length / floatsPerTriangle) : 0;
+   const triangleCount = Math.min(trianglesFromStone, trianglesFromBuffer);
+
+   const buffer = new ArrayBuffer(84 + triangleCount * 50);
+   const bytes = new Uint8Array(buffer);
+   const view = new DataView(buffer);
+   const headerText = 'Binary STL exported from PerfectGem';
+   const headerBytes = new TextEncoder().encode(headerText);
+   bytes.set(headerBytes.subarray(0, Math.min(80, headerBytes.length)), 0);
+   view.setUint32(80, triangleCount, true);
+
+   if (!vertexData || triangleCount === 0) return buffer;
+
+   let readOffset = 0;
+   let writeOffset = 84;
+   for (let i = 0; i < triangleCount; i++) {
+      const nx = vertexData[readOffset + 3];
+      const ny = vertexData[readOffset + 4];
+      const nz = vertexData[readOffset + 5];
+      view.setFloat32(writeOffset + 0, nx, true);
+      view.setFloat32(writeOffset + 4, ny, true);
+      view.setFloat32(writeOffset + 8, nz, true);
+
+      for (let v = 0; v < 3; v++) {
+         const vertexOffset = readOffset + v * 7;
+         const writeVertexOffset = writeOffset + 12 + v * 12;
+         view.setFloat32(writeVertexOffset + 0, vertexData[vertexOffset + 0], true);
+         view.setFloat32(writeVertexOffset + 4, vertexData[vertexOffset + 1], true);
+         view.setFloat32(writeVertexOffset + 8, vertexData[vertexOffset + 2], true);
+      }
+
+      // STL attribute byte count (unused)
+      view.setUint16(writeOffset + 48, 0, true);
+
+      readOffset += floatsPerTriangle;
+      writeOffset += 50;
+   }
+
+   return buffer;
+}
+
+function buildDesignStlBuffer(definition = {}) {
+   const stone = buildStoneFromFacetDesign(definition);
+   normalizeStoneToUnitSphere(stone);
+   return stoneToBinaryStlBuffer(stone);
+}
+
 const GIRDLE_ANGLE_EPS_DEG = 1.0;
 const isGirdleFacet = (facet) => {
    const angleDeg = computeFacetAngleDeg(facet.normal);
@@ -2549,5 +2600,6 @@ export {
    buildDesignGcsText,
    buildDesignAscText,
    buildDesignGemBuffer,
+   buildDesignStlBuffer,
 };
 
