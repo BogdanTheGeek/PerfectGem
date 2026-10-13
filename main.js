@@ -943,7 +943,8 @@ function buildUI(ui, cbs) {
       };
 
       // render into temporary canvases in the current window
-      const dataURLs = {};
+      const monoDataURLs = {};
+      const tierDataURLs = {};
       const gear = parseInt(designGearEl.value, 10);
       const designDefinition = {
          gear: gear,
@@ -956,14 +957,27 @@ function buildUI(ui, cbs) {
       const faces = facesList.faces;
       stone.preform = facesList.preform;
       const summary = computeFacetNotesSummary(stone);
-      const summaryHtml = buildFacetInfo(stone, summary);
+      const tierColorByKey = new Map();
+      const summaryHtml = buildFacetInfo(stone, summary, {
+         tierColorByKey,
+         useTierColors: true,
+      });
       const size = 500;
       for (const [name, view] of Object.entries(views)) {
          const tmp = document.createElement('canvas');
          tmp.width = size;
          tmp.height = size;
          renderOrtho(faces, view, tmp, 1 / modelBoundsRadius, gear, summary);
-         dataURLs[name] = tmp.toDataURL();
+         monoDataURLs[name] = tmp.toDataURL();
+
+         const tmpTier = document.createElement('canvas');
+         tmpTier.width = size;
+         tmpTier.height = size;
+         renderOrtho(faces, view, tmpTier, 1 / modelBoundsRadius, gear, summary, {
+            tierColorByKey,
+            enableTierColors: true,
+         });
+         tierDataURLs[name] = tmpTier.toDataURL();
       }
 
       const graphSvg = buildGraphSvgMarkup(
@@ -975,8 +989,8 @@ function buildUI(ui, cbs) {
       const graphImg = `<div id="graph" class="graph">${graphSvg}</div>`;
 
       // build html using <img> tags with the captured pixel data
-      const imgs = Object.entries(dataURLs)
-         .map(([name, url]) => `<img id="${name}" src="${url}" style="width:32%;aspect-ratio:1;">`)
+      const imgs = Object.entries(monoDataURLs)
+         .map(([name, url]) => `<img id="${name}" data-ortho-view="${name}" data-src-mono="${url}" data-src-tier="${tierDataURLs[name]}" src="${url}" style="width:32%;aspect-ratio:1;">`)
          .join('\n');
 
       let stoneRenderImg = '';
@@ -996,6 +1010,22 @@ function buildUI(ui, cbs) {
 <head>
   <style>
 body { font-family: Arial; margin: 20px; }
+.printTools {
+   position: sticky;
+   top: 0;
+   display: flex;
+   justify-content: flex-end;
+   margin: -8px 0 8px;
+   background: #fff;
+   z-index: 2;
+}
+.tierColorToggle {
+   font-size: 12px;
+   display: inline-flex;
+   align-items: center;
+   gap: 6px;
+   user-select: none;
+}
 .header { font-size: 18px; font-weight: bold; margin-bottom: 12px; margin-top: 12px; }
 .facetSection {
    padding: 0px 10px 10px;
@@ -1009,8 +1039,15 @@ body { font-family: Arial; margin: 20px; }
    display: grid;
    grid-template-columns: 40px 58px minmax(0,1fr) minmax(0,1.2fr);
    gap: 4px 10px; align-items: start; padding: 4px 0;
+   border-left: 4px solid transparent;
+   border-radius: 6px;
+   padding-left: 6px;
 }
 .facetGroup + .facetGroup { border-top: 1px solid; }
+body.tierColorsOn .facetGroup[data-tier-color] {
+   border-left-color: var(--tier-color);
+   background: color-mix(in srgb, var(--tier-color) 14%, white);
+}
 .facetGroupName,
 .facetGroupAngle { font-size: 12px; font-weight: 600; }
 .facetGroupIndexes,
@@ -1080,6 +1117,12 @@ body { font-family: Arial; margin: 20px; }
   </style>
 </head>
 <body>
+<div class="printTools">
+   <label class="tierColorToggle">
+      <input id="tierColorToggle" type="checkbox">
+      Colour tiers
+   </label>
+</div>
 <div class="wrapper">
 ${imgs}
 ${summaryHtml}
@@ -1089,6 +1132,21 @@ ${summaryHtml}
 ${graphImg}
 <div class="header">Render:</div>
 ${stoneRenderImg}
+<script>
+(() => {
+   const toggle = document.getElementById('tierColorToggle');
+   if (!toggle) return;
+   const applyState = (on) => {
+      document.body.classList.toggle('tierColorsOn', on);
+      document.querySelectorAll('img[data-ortho-view]').forEach((img) => {
+         const nextSrc = on ? img.dataset.srcTier : img.dataset.srcMono;
+         if (nextSrc) img.src = nextSrc;
+      });
+   };
+   toggle.addEventListener('change', () => applyState(toggle.checked));
+   applyState(false);
+})();
+</script>
 </body>
 </html>`);
       printWindow.document.close();

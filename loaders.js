@@ -262,7 +262,16 @@ async function loadGCS(data) {
    return new StoneData(vertexData, triCount, facets, refractiveIndex, dispersion, sourceGear, metadata);
 }
 
-function buildFacetInfo(stone, summary = null) {
+function getTierColor(index) {
+   const hue = (index * 47) % 360;
+   return `hsl(${hue} 78% 45%)`;
+}
+
+function buildFacetInfo(stone, summary = null, options = {}) {
+   const tierColorByKey = options?.tierColorByKey instanceof Map ? options.tierColorByKey : null;
+   const useTierColors = Boolean(options?.useTierColors && tierColorByKey);
+   let tierColorIndex = 0;
+
    if (!stone || !stone.facets || stone.facets.length === 0) {
       return '<div class="facetEmpty">No facet notes were found for this model.</div>';
    }
@@ -300,8 +309,20 @@ function buildFacetInfo(stone, summary = null) {
                <div class="facetSectionTitle">${sectionName}</div>
                ${entries.map((entry) => {
          const instruction = entry.instructions ? escapeHtml(entry.instructions) : '—';
+         const tierKey = makeKeyFromFacet(entry);
+         let tierColor = null;
+         if (useTierColors) {
+            if (!tierColorByKey.has(tierKey)) {
+               tierColorByKey.set(tierKey, getTierColor(tierColorIndex));
+               tierColorIndex += 1;
+            }
+            tierColor = tierColorByKey.get(tierKey);
+         }
+         const tierAttrs = tierColor
+            ? ` data-tier-color="1" style="--tier-color:${tierColor};"`
+            : '';
          return `
-                     <div class="facetGroup">
+                     <div class="facetGroup"${tierAttrs}>
                         <div class="facetGroupName">${escapeHtml(entry.name)}</div>
                         <div class="facetGroupAngle">${escapeHtml(entry.angleLabel)}</div>
                         <div class="facetGroupIndexes">${escapeHtml(formatFacetIndexLines(entry.indexes))}</div>
@@ -2108,6 +2129,7 @@ function generateFacesFromFacetList(facetList = [], gear = 96) {
          instructions: p.instructions || '',
          normal: normal,
          vertices: verts,
+         d: p.d,
          angleDeg,
          signedAngleDeg,
          azimuthDeg,
@@ -2602,4 +2624,3 @@ export {
    buildDesignGemBuffer,
    buildDesignStlBuffer,
 };
-
