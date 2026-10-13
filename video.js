@@ -409,6 +409,7 @@ function validateExporterRuntime(runtime) {
       'quantizeOrientationAngle',
       'sampleTiltAnimation',
       'requestRender',
+      'packUniformDataForExport',
       'clearTiltPrewarm',
       'getAnimationState',
       'setAnimationState',
@@ -448,6 +449,7 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
       quantizeOrientationAngle,
       sampleTiltAnimation,
       requestRender,
+      packUniformDataForExport,
       clearTiltPrewarm,
       getAnimationState,
       setAnimationState,
@@ -551,7 +553,7 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
    const exportModelMat = mat4.create();
    const exportViewMat = mat4.create();
    const exportProjMat = mat4.create();
-   const exportUniformScratch = new Float32Array(272 / 4);
+   const exportUniformScratch = new Float32Array(320 / 4);
 
    const encodeErrorState = { error: null };
    const encoder = new VideoEncoder({
@@ -602,29 +604,17 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
          mat4.rotateX(exportModelMat, exportModelMat, rotX);
          mat4.rotateY(exportModelMat, exportModelMat, rotY);
 
-         exportUniformScratch.set(exportModelMat, 0);
-         exportUniformScratch.set(exportViewMat, 16);
-         exportUniformScratch.set(exportProjMat, 32);
-         exportUniformScratch[48] = 0;
-         exportUniformScratch[49] = 0;
-         exportUniformScratch[50] = camDist;
-         exportUniformScratch[51] = uiState.clarity;
-         exportUniformScratch[52] = elapsed;
-         exportUniformScratch[53] = uiState.ri;
-         exportUniformScratch[54] = uiState.cod;
-         exportUniformScratch[55] = uiState.lightMode;
-         exportUniformScratch[56] = uiState.color[0];
-         exportUniformScratch[57] = uiState.color[1];
-         exportUniformScratch[58] = uiState.color[2];
-         exportUniformScratch[59] = 0.0;
-         exportUniformScratch[60] = uiState.exitHighlight[0];
-         exportUniformScratch[61] = uiState.exitHighlight[1];
-         exportUniformScratch[62] = uiState.exitHighlight[2];
-         exportUniformScratch[63] = uiState.exitStrength;
-         exportUniformScratch[64] = uiState.lightMode === 4 ? 1.0 : 0.0;
-         exportUniformScratch[65] = uiState.headShadowColor[0];
-         exportUniformScratch[66] = uiState.headShadowColor[1];
-         exportUniformScratch[67] = uiState.headShadowColor[2];
+         packUniformDataForExport(
+            exportUniformScratch,
+            exportModelMat,
+            exportViewMat,
+            exportProjMat,
+            elapsed,
+            uiState.lightMode,
+            0.0,
+            uiState.lightMode === 4 ? 1.0 : 0.0,
+            [0, 0, camDist],
+         );
          device.queue.writeBuffer(uniformBuffer, 0, exportUniformScratch);
 
          const commandEncoder = device.createCommandEncoder();

@@ -5471,6 +5471,29 @@ async function setupApp() {
       quantizeOrientationAngle,
       sampleTiltAnimation,
       requestRender,
+      packUniformDataForExport(
+         out,
+         modelMatrix,
+         viewMatrix,
+         projectionMatrix,
+         time,
+         lightMode,
+         graphMode,
+         flatShading,
+         camPos,
+      ) {
+         const savedViewMat = new Float32Array(viewMat);
+         const savedCamPos = [cameraPos[0], cameraPos[1], cameraPos[2]];
+         viewMat.set(viewMatrix);
+         cameraPos[0] = camPos[0];
+         cameraPos[1] = camPos[1];
+         cameraPos[2] = camPos[2];
+         packUniformData(out, modelMatrix, projectionMatrix, time, lightMode, graphMode, flatShading);
+         viewMat.set(savedViewMat);
+         cameraPos[0] = savedCamPos[0];
+         cameraPos[1] = savedCamPos[1];
+         cameraPos[2] = savedCamPos[2];
+      },
       clearTiltPrewarm() {
          if (!tiltPreRenderRequested) return;
          tiltPreRenderRequested = false;
