@@ -677,6 +677,8 @@ function buildStoneFromHalfSpacePlanes(planes, refractiveIndex = null, sourceGea
          normal: [p.a, p.b, p.c],
          d: p.d,
          triangleCount,
+         sourceFacetOrder: Number.isFinite(Number(p.facetOrder)) ? Number(p.facetOrder) : -1,
+         sourceGearIndex: Number.isFinite(Number(p.index)) ? Number(p.index) : null,
       });
 
       for (let i = 1; i < verts.length - 1; i++) {
@@ -960,6 +962,7 @@ function buildStoneFromFacetDesign(definition = {}) {
    const planes = createBootstrapCubePlanes(1.0);
 
    facets.forEach((facet, idx) => {
+      if (facet?.previewDisabled) return;
       const facetName = String(facet?.name || `F${idx + 1}`).trim();
       const instructions = String(facet?.instructions || '').trim();
       const normalized = normalizeFacetMetadata(facetName, instructions);
@@ -1930,6 +1933,7 @@ function normalizeDesignFacet(inputFacet = {}, fallbackIndex = 0) {
       startIndex: Math.max(0, Math.min(360, Math.round(Number.isFinite(parsedStartIndex) ? parsedStartIndex : 0))),
       distance: normalizedDistance,
       indexes: parsedIndexes && parsedIndexes.length ? parsedIndexes : undefined,
+      previewDisabled: Boolean(inputFacet.previewDisabled),
    };
    return next;
 }
@@ -1946,6 +1950,7 @@ function generateFacesFromFacetList(facetList = [], gear = 96) {
    const planes = [];
    for (let facetOrder = 0; facetOrder < normalizedInput.length; facetOrder++) {
       const facet = normalizedInput[facetOrder];
+      if (facet.previewDisabled) continue;
       const symmetry = Math.min(gear, Math.round(Number(facet.symmetry) || gear));
       const step = Math.max(1, gear) / symmetry;
       const mirror = Boolean(facet.mirror);
@@ -2602,4 +2607,3 @@ export {
    buildDesignGemBuffer,
    buildDesignStlBuffer,
 };
-

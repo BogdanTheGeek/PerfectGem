@@ -1471,6 +1471,10 @@ async function setupApp() {
       setDesignStatus(`${designFacets.length} design facets (${uniqueNames} names)`);
    }
 
+   function buildDesignPreviewFacetList() {
+      return designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx));
+   }
+
    function snapshotDesignFacets() {
       return designFacets.map((facet, idx) => normalizeDesignFacet({ ...facet }, idx));
    }
@@ -1579,6 +1583,7 @@ async function setupApp() {
 
       const rows = designFacets.map((facet, idx) => `
          <tr data-id="${escapeHtml(facet.id)}">
+            <td class="cellMirror"><label class="check"><input data-field="previewDisabled" type="checkbox" ${facet.previewDisabled ? 'checked' : ''}></label></td>
             <td class="cellName"><input data-field="name" type="text" value="${escapeHtml(facet.name || `F${idx + 1}`)}"></td>
             <td class="cellNum"><input data-field="symmetry" type="number" min="1" max="96" step="1" value="${facet.symmetry}"></td>
             <td class="cellMirror"><label class="check"><input data-field="mirror" type="checkbox" ${facet.mirror ? 'checked' : ''}></label></td>
@@ -1593,6 +1598,7 @@ async function setupApp() {
       designFacetListEl.innerHTML = `
          <table class="designFacetTable">
             <colgroup>
+               <col class="colPreview">
                <col class="colName">
                <col class="colSym">
                <col class="colMirror">
@@ -1604,6 +1610,7 @@ async function setupApp() {
             </colgroup>
             <thead>
                <tr>
+                  <th>Off</th>
                   <th>Name</th>
                   <th>Sym</th>
                   <th>Mirror</th>
@@ -2481,6 +2488,7 @@ async function setupApp() {
       queueDesignInputHistory();
       const nextFacet = { ...designFacets[facetIdx] };
       if (field === 'mirror') nextFacet[field] = Boolean(e.target.checked);
+      else if (field === 'previewDisabled') nextFacet.previewDisabled = Boolean(e.target.checked);
       else if (field === 'name' || field === 'instructions') nextFacet[field] = e.target.value;
       else nextFacet[field] = parseFloat(e.target.value);
       if (field === 'symmetry' || field === 'mirror' || field === 'startIndex') {
@@ -5126,6 +5134,9 @@ async function setupApp() {
             stone.sourceGear,
          );
          setMetadataToDesign(stone.metadata);
+         if (Array.isArray(stone.facets) && stone.facets.length > 0) {
+            renderFacetInfo(stone);
+         }
       }
 
       if (isDesign && selectedVertexPosition) {
@@ -5154,7 +5165,7 @@ async function setupApp() {
          const designDefinition = {
             gear,
             refractiveIndex: ui.ri,
-            facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
+            facets: buildDesignPreviewFacetList(),
             metadata: getMetadataFromDesign(),
          };
          const designStone = buildStoneFromFacetDesign(designDefinition);
@@ -5178,7 +5189,7 @@ async function setupApp() {
          const designDefinition = {
             gear: gear,
             refractiveIndex: ui.ri,
-            facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
+            facets: buildDesignPreviewFacetList(),
             metadata: getMetadataFromDesign(),
          };
          const stone = buildStoneFromFacetDesign(designDefinition);
@@ -5214,7 +5225,7 @@ async function setupApp() {
       const designDefinition = {
          gear: gear,
          refractiveIndex: ui.ri,
-         facets: designFacets.map((f, idx) => normalizeDesignFacet(f, idx)),
+         facets: buildDesignPreviewFacetList(),
          metadata: getMetadataFromDesign(),
       };
       let stone = buildStoneFromFacetDesign(designDefinition);
@@ -5382,9 +5393,6 @@ async function setupApp() {
       onGemTopTabChanged(tabName) {
          const prevTab = currentGemTab;
          currentGemTab = tabName;
-         if (tabName !== 'design') {
-            clearDesignSelection(true);
-         }
 
          if (tabName === 'cuts' && prevTab !== 'cuts') {
             captureCutsRestoreState(prevTab);
