@@ -2477,16 +2477,18 @@ async function setupApp() {
    installNumberDragScrub(designBodyEl);
    installNumberDragScrub(designFacetListEl);
    installDesignFacetRowReorder(designFacetListEl);
+   const hasFrostedKeyword = (text) => /\bfrosted\b/i.test(String(text || ''));
 
    designFacetListEl.addEventListener('input', (e) => {
       const itemEl = e.target.closest('[data-id]');
       if (!itemEl) return;
       const facetIdx = designFacets.findIndex((facet) => facet.id === itemEl.dataset.id);
       if (facetIdx < 0) return;
+      const currentFacet = designFacets[facetIdx];
       const field = e.target.dataset.field;
       if (!field) return;
       queueDesignInputHistory();
-      const nextFacet = { ...designFacets[facetIdx] };
+      const nextFacet = { ...currentFacet };
       if (field === 'mirror') nextFacet[field] = Boolean(e.target.checked);
       else if (field === 'previewDisabled') nextFacet.previewDisabled = Boolean(e.target.checked);
       else if (field === 'name' || field === 'instructions') nextFacet[field] = e.target.value;
@@ -2510,9 +2512,13 @@ async function setupApp() {
             }
          }
       }
+      const frostedChanged = field === 'instructions'
+         && hasFrostedKeyword(currentFacet?.instructions) !== hasFrostedKeyword(nextNormalizedFacet.instructions);
       designFacets[facetIdx] = nextNormalizedFacet;
       updateDesignStatusSummary();
-      const geometryChanged = field !== 'name' && field !== 'instructions';
+      const geometryChanged = field === 'instructions'
+         ? frostedChanged
+         : field !== 'name';
       scheduleDesignApply(geometryChanged);
    });
 
