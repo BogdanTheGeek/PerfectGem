@@ -583,7 +583,9 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
 
       const SENSOR_HALF = 5 * Math.tan(Math.PI / 8) * STONE_MARGIN_SCALE;
       const camDist = uiState.focalLength / 10;
-      mat4.lookAt(exportViewMat, [0, 0, camDist], [0, 0, 0], [0, 1, 0]);
+      const isCircleTiltStyle = uiState.easingFuncName === 'circleClockwise';
+      const baseCameraPos = [0, 0, camDist];
+      mat4.lookAt(exportViewMat, baseCameraPos, [0, 0, 0], [0, 1, 0]);
       const exportFovY = 2 * Math.atan(SENSOR_HALF / camDist);
       mat4.perspective(exportProjMat, exportFovY, exportCanvas.width / exportCanvas.height, 0.1, 200.0);
 
@@ -595,14 +597,29 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
       for (let frameIndex = 0; frameIndex < renderedFrames; frameIndex++) {
          if (encodeErrorState.error) throw encodeErrorState.error;
 
-         const elapsed = frameIndex / exportFps;
+         const elapsed = (frameIndex / renderedFrames) * TILT_ANIM_CYCLE_SEC;
          const animSample = sampleTiltAnimation(elapsed, ampRad);
-         const rotX = quantizeOrientationAngle(baseRotX + Math.min(Math.max(animSample.x, 0), ampRad));
-         const rotY = quantizeOrientationAngle(baseRotY + Math.min(Math.max(animSample.y, 0), ampRad));
+         const rotX = isCircleTiltStyle
+            ? baseRotX
+            : quantizeOrientationAngle(baseRotX + Math.min(Math.max(animSample.x, 0), ampRad));
+         const rotY = isCircleTiltStyle
+            ? baseRotY
+            : quantizeOrientationAngle(baseRotY + Math.min(Math.max(animSample.y, 0), ampRad));
 
          mat4.identity(exportModelMat);
          mat4.rotateX(exportModelMat, exportModelMat, rotX);
          mat4.rotateY(exportModelMat, exportModelMat, rotY);
+
+         const frameCameraPos = isCircleTiltStyle
+            ? [
+               camDist * Math.sin(ampRad) * Math.sin((elapsed / TILT_ANIM_CYCLE_SEC) * Math.PI * 2.0),
+               -camDist * Math.sin(ampRad) * Math.cos((elapsed / TILT_ANIM_CYCLE_SEC) * Math.PI * 2.0),
+               camDist * Math.cos(ampRad),
+            ]
+            : baseCameraPos;
+         if (isCircleTiltStyle) {
+            mat4.lookAt(exportViewMat, frameCameraPos, [0, 0, 0], [0, 1, 0]);
+         }
 
          packUniformDataForExport(
             exportUniformScratch,
@@ -613,7 +630,7 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
             uiState.lightMode,
             0.0,
             uiState.lightMode === 4 ? 1.0 : 0.0,
-            [0, 0, camDist],
+            frameCameraPos,
          );
          device.queue.writeBuffer(uniformBuffer, 0, exportUniformScratch);
 

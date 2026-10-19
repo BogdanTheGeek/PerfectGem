@@ -104,6 +104,7 @@ const easingFuncs = {
    'easeOutSine': { func: easeOutSine, icon: easeToSvgIcon(easeOutSine) },
    'easeInOutSine': { func: easeInOutSine, icon: easeToSvgIcon(easeInOutSine) },
    'easeInOutQuad': { func: easeInOutQuad, icon: easeToSvgIcon(easeInOutQuad) },
+   'circleClockwise': { func: easeLinear, icon: 'M 0.5 0.1 A 0.4 0.4 0 1 1 0.499 0.1' },
 };
 
 // ---------------------------------------------------------------------------
@@ -915,13 +916,19 @@ function buildUI(ui, cbs) {
 
    // --- View buttons (Reset / Tilt) ---
    const vTiltEl = panel.querySelector('#vTilt');
-   panel.querySelector('#vReset').addEventListener('click', () => {
+   const setViewAnimButtonState = (on) => {
       vTiltEl.classList.remove('active');
+      if (!on) return;
+      vTiltEl.classList.add('active');
+   };
+
+   panel.querySelector('#vReset').addEventListener('click', () => {
+      setViewAnimButtonState(false);
       cbs.onReset();
    });
    vTiltEl.addEventListener('click', () => {
-      const on = cbs.onTilt();
-      vTiltEl.classList.toggle('active', on);
+      const on = cbs.onTilt?.();
+      setViewAnimButtonState(on);
    });
 
    // Tilt angle control
@@ -1099,6 +1106,9 @@ ${stoneRenderImg}
 
    // External API for model-loading to push updates into the live panel
    return {
+      setTiltAnimating(on) {
+         setViewAnimButtonState(Boolean(on));
+      },
       setFileName(name) {
          fileNameEl.textContent = name;
       },
@@ -4861,12 +4871,22 @@ async function setupApp() {
       return Math.round(angleRad / ORIENTATION_CACHE_ANGLE_STEP_RAD) * ORIENTATION_CACHE_ANGLE_STEP_RAD;
    }
 
+   function isCircleTiltAnimationStyle() {
+      return ui.easingFuncName === 'circleClockwise';
+   }
+
    function sampleTiltAnimation(timeInCycleSec, ampRad) {
       const cycle = ((timeInCycleSec % TILT_ANIM_CYCLE_SEC) + TILT_ANIM_CYCLE_SEC) % TILT_ANIM_CYCLE_SEC;
+      if (isCircleTiltAnimationStyle()) {
+         const theta = (cycle / TILT_ANIM_CYCLE_SEC) * Math.PI * 2.0;
+         return {
+            x: ampRad * Math.sin(theta),
+            y: -ampRad * Math.cos(theta),
+         };
+      }
       const step = Math.floor(cycle / TILT_ANIM_STEP_SEC);
       const frac = (cycle % TILT_ANIM_STEP_SEC) / TILT_ANIM_STEP_SEC;
       const norm = upDownBell(frac);
-      // TODO: add animation switch
       const easingFunc = easingFuncs[ui.easingFuncName].func;
       const bell = easingFunc(norm);
       return {
@@ -4898,6 +4918,7 @@ async function setupApp() {
    }
 
    function requestTiltPreRender() {
+      if (isCircleTiltAnimationStyle()) return;
       if (!renderBundle) return;
       const baseRotX = quantizeOrientationAngle(currentRotX);
       const baseRotY = quantizeOrientationAngle(currentRotY);
@@ -4969,6 +4990,15 @@ async function setupApp() {
    }
 
    function advanceTiltPreRender(time, bindGroup, vertexBuffer, triCount) {
+      if (isCircleTiltAnimationStyle()) {
+         if (tiltPreRenderRequested) {
+            tiltPreRenderRequested = false;
+            tiltPreRenderQueue = [];
+            tiltPreRenderIndex = 0;
+            updatePrewarmOverlay();
+         }
+         return;
+      }
       if (!tiltPreRenderRequested || tiltPreRenderReady || !renderBundle) return;
       if (isMobileDevice) {
          prewarmYieldFlip = !prewarmYieldFlip;
@@ -5370,16 +5400,18 @@ async function setupApp() {
          tiltCycleFrameCount = 0;
          tiltCycleAccumSec = 0;
          tiltCycleCompletedCount = 0;
+         uiControls?.setTiltAnimating?.(false);
          requestRender();
       },
       onTilt() {
          animating = !animating;
          if (animating) {
             animStartTime = performance.now() * 0.001;
-            if (isMobileDevice) {
+            if (isMobileDevice && !isCircleTiltAnimationStyle()) {
                requestTiltPreRender();
             }
          }
+         uiControls?.setTiltAnimating?.(animating);
          requestRender();
          return animating;
       },
@@ -5608,8 +5640,8 @@ async function setupApp() {
          lastX = ev.clientX; lastY = ev.clientY;
       }
       if (animating) {
-         const vTiltEl = panel.querySelector('#vTilt');
-         vTiltEl.click();
+         uiControls?.setTiltAnimating?.(false);
+         animating = false;
       }
       requestRender();
    });
@@ -5832,15 +5864,18 @@ async function setupApp() {
    // --- Uniforms ---
    function updateUniforms(time) {
       let animX = 0, animY = 0;
+      const isCircleTiltMode = animating && isCircleTiltAnimationStyle();
       if (animating) {
          let elapsed = time - animStartTime;
-         if (tiltPreRenderReady) {
+         if (tiltPreRenderReady && !isCircleTiltMode) {
             elapsed = Math.round(elapsed * tiltPreRenderSampleFps) / tiltPreRenderSampleFps;
          }
-         const animSample = sampleTiltAnimation(elapsed, ui.tiltAngleDeg * Math.PI / 180.0);
-         const amp = ui.tiltAngleDeg * Math.PI / 180.0;
-         animX = Math.min(Math.max(animSample.x, 0), amp);
-         animY = Math.min(Math.max(animSample.y, 0), amp);
+         if (!isCircleTiltMode) {
+            const animSample = sampleTiltAnimation(elapsed, ui.tiltAngleDeg * Math.PI / 180.0);
+            const amp = ui.tiltAngleDeg * Math.PI / 180.0;
+            animX = Math.min(Math.max(animSample.x, 0), amp);
+            animY = Math.min(Math.max(animSample.y, 0), amp);
+         }
       }
 
       currentRotX += (targetRotX - currentRotX) * 0.1;
@@ -5868,8 +5903,20 @@ async function setupApp() {
       //   fov = 2·atan(SENSOR_HALF / d)  where SENSOR_HALF = d_ref·tan(fov_ref/2)
       const SENSOR_HALF = 5 * Math.tan(Math.PI / 8) * STONE_MARGIN_SCALE; // margin scales apparent framing
       const camDist = ui.focalLength / 10;
-      cameraPos[2] = camDist;
-      mat4.lookAt(viewMat, [0, 0, camDist], [0, 0, 0], [0, 1, 0]);
+      if (isCircleTiltMode) {
+         const amp = ui.tiltAngleDeg * Math.PI / 180.0;
+         const cycle = ((time - animStartTime) % TILT_ANIM_CYCLE_SEC + TILT_ANIM_CYCLE_SEC) % TILT_ANIM_CYCLE_SEC;
+         const theta = (cycle / TILT_ANIM_CYCLE_SEC) * Math.PI * 2.0;
+         const sinAmp = Math.sin(amp);
+         cameraPos[0] = camDist * sinAmp * Math.sin(theta);
+         cameraPos[1] = -camDist * sinAmp * Math.cos(theta);
+         cameraPos[2] = camDist * Math.cos(amp);
+      } else {
+         cameraPos[0] = 0;
+         cameraPos[1] = 0;
+         cameraPos[2] = camDist;
+      }
+      mat4.lookAt(viewMat, [cameraPos[0], cameraPos[1], cameraPos[2]], [0, 0, 0], [0, 1, 0]);
       const fovY = 2 * Math.atan(SENSOR_HALF / camDist);
       mat4.perspective(projMat, fovY, aspect, 0.1, 200.0);
 
@@ -5906,7 +5953,7 @@ async function setupApp() {
             tiltCycleCompletedCount += 1;
             if (tiltCycleAccumSec > 0 && tiltCycleCompletedCount >= 2) {
                tiltCycleAvgFps = tiltCycleFrameCount / tiltCycleAccumSec;
-               if (tiltCycleAvgFps < TILT_PRERENDER_FPS_THRESHOLD && !tiltPreRenderRequested && !tiltPreRenderReady) {
+               if (!isCircleTiltAnimationStyle() && tiltCycleAvgFps < TILT_PRERENDER_FPS_THRESHOLD && !tiltPreRenderRequested && !tiltPreRenderReady) {
                   requestTiltPreRender();
                }
             }
@@ -5921,7 +5968,7 @@ async function setupApp() {
          tiltCycleCompletedCount = 0;
       }
 
-      const useTiltCache = animating && tiltPreRenderReady;
+      const useTiltCache = animating && !isCircleTiltAnimationStyle() && tiltPreRenderReady;
 
       const updateStartMs = performance.now();
       updateUniforms(time);
