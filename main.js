@@ -56,6 +56,26 @@ const presets = [
    ['Peridot', 1.65, 0.015, '#a7ff28', '#6db516', '#d3ff8a'],
    ['Aquamarine', 1.57, 0.012, '#8df6e8', '#4fbec4', '#c8fff8'],
 ];
+const presetSpecificGravityByName = Object.freeze({
+   Quartz: 2.65,
+   Diamond: 3.52,
+   Ruby: 4.0,
+   Sapphire: 4.0,
+   Emerald: 2.72,
+   Amethyst: 2.65,
+   Topaz: 3.53,
+   Spinel: 3.6,
+   Zircon: 4.65,
+   'Cubic Zirconia': 5.8,
+   Garnet: 4.1,
+   Tourmaline: 3.06,
+   'Chrome Tourmaline': 3.06,
+   'Pink Tourmaline': 3.06,
+   Iolite: 2.62,
+   Tanzanite: 3.35,
+   Peridot: 3.34,
+   Aquamarine: 2.72,
+});
 
 const panel = document.getElementById('gemui');
 const toggleBtn = document.getElementById('gemui-toggle');
@@ -239,6 +259,9 @@ const designSizeUEl = document.getElementById('designSizeU');
 const designSizeTEl = document.getElementById('designSizeT');
 const designSizeGValueEl = document.getElementById('designSizeGValue');
 const designSizeHEl = document.getElementById('designSizeH');
+const designSizeVEl = document.getElementById('designSizeV');
+const designSizeSgValueEl = document.getElementById('designSizeSgValue');
+const designSizeCtEl = document.getElementById('designSizeCt');
 const designSizeCalcStatusEl = document.getElementById('designSizeCalcStatus');
 let graphCanvasWidth = 388;
 let graphCanvasHeight = 220;
@@ -258,6 +281,17 @@ let modelHasTableFacet = false;
 let designSizeOverlayWidthMm = null;
 const GEM_LIBRARY_ORIGIN = 'https://bogdanthegeek.github.io';
 const GEM_LIBRARY_OPEN_MODEL_EVENT = 'gemlibrary:open-model';
+
+function applyPresetSpecificGravityToDesignCalculator(presetIndex) {
+   if (!designSizeSgValueEl) return;
+   const idx = Number(presetIndex);
+   if (!Number.isInteger(idx) || idx < 0 || idx >= presets.length) return;
+   const presetName = String(presets[idx]?.[0] || '');
+   const sg = presetSpecificGravityByName[presetName];
+   if (!Number.isFinite(sg) || sg <= 0) return;
+   designSizeSgValueEl.value = sg.toFixed(3);
+   designSizeSgValueEl.dispatchEvent(new Event('input', { bubbles: true }));
+}
 let gemLibraryBridgeInstalled = false;
 
 const GRAPH_THEME_DARK = {
@@ -566,6 +600,7 @@ function buildUI(ui, cbs) {
    const gPreset = panel.querySelector('#gPreset');
    gPreset.innerHTML = presets.map((p, i) => `<option value="${i}">${p[0]}</option>`).join('')
       + '<option value="-1">Custom</option>';
+   applyPresetSpecificGravityToDesignCalculator(0);
 
    // Initialise slider / display values from ui state
    panel.querySelector('#riSlider').value = ui.ri;
@@ -820,6 +855,7 @@ function buildUI(ui, cbs) {
       setAxisColors(axisAHex, axisBHex, axisCHex);
       clearSwatchActive();
       setClarityValue(0.5);
+      applyPresetSpecificGravityToDesignCalculator(idx);
       cbs.onGraphParamsChanged?.();
       cbs.onRenderOutputChanged?.();
    });
@@ -1405,7 +1441,105 @@ async function setupApp() {
       setDesignSizeValue(designSizeUEl, NaN);
       setDesignSizeValue(designSizeTEl, NaN);
       setDesignSizeValue(designSizeHEl, NaN);
+      setDesignSizeValue(designSizeVEl, NaN);
+      setDesignSizeValue(designSizeCtEl, NaN);
       designSizeOverlayWidthMm = null;
+   }
+
+   function computeStoneWidthUnits(stone) {
+      const data = stone?.vertexData;
+      if (!(data instanceof Float32Array) || data.length < 7) return null;
+      let minX = Infinity;
+      let maxX = -Infinity;
+      let minY = Infinity;
+      let maxY = -Infinity;
+      for (let i = 0; i <= data.length - 7; i += 7) {
+         const x = Number(data[i + 0]);
+         const y = Number(data[i + 1]);
+         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+         if (x < minX) minX = x;
+         if (x > maxX) maxX = x;
+         if (y < minY) minY = y;
+         if (y > maxY) maxY = y;
+      }
+      const xSpan = maxX - minX;
+      const ySpan = maxY - minY;
+      const width = Math.min(xSpan, ySpan);
+      return Number.isFinite(width) && width > 0 ? width : null;
+   }
+
+   function computeStoneMeshVolumeUnits(stone) {
+      const data = stone?.vertexData;
+      const triCount = Math.max(0, Math.round(Number(stone?.triangleCount) || 0));
+      if (!(data instanceof Float32Array) || triCount <= 0 || data.length < 21) return null;
+
+      const maxTriByData = Math.floor(data.length / 21);
+      const triLimit = Math.min(triCount, maxTriByData);
+      if (triLimit <= 0) return null;
+
+      let centroidX = 0;
+      let centroidY = 0;
+      let centroidZ = 0;
+      let centroidCount = 0;
+      for (let i = 0; i < triLimit; i++) {
+         const base = i * 21;
+         for (let v = 0; v < 3; v++) {
+            const idx = base + v * 7;
+            const x = Number(data[idx + 0]);
+            const y = Number(data[idx + 1]);
+            const z = Number(data[idx + 2]);
+            if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+            centroidX += x;
+            centroidY += y;
+            centroidZ += z;
+            centroidCount++;
+         }
+      }
+      if (centroidCount <= 0) return null;
+      centroidX /= centroidCount;
+      centroidY /= centroidCount;
+      centroidZ /= centroidCount;
+
+      let signedVolume = 0;
+      for (let i = 0; i < triLimit; i++) {
+         const base = i * 21;
+         let ax = Number(data[base + 0]), ay = Number(data[base + 1]), az = Number(data[base + 2]);
+         let bx = Number(data[base + 7]), by = Number(data[base + 8]), bz = Number(data[base + 9]);
+         let cx = Number(data[base + 14]), cy = Number(data[base + 15]), cz = Number(data[base + 16]);
+         if (
+            !Number.isFinite(ax) || !Number.isFinite(ay) || !Number.isFinite(az)
+            || !Number.isFinite(bx) || !Number.isFinite(by) || !Number.isFinite(bz)
+            || !Number.isFinite(cx) || !Number.isFinite(cy) || !Number.isFinite(cz)
+         ) continue;
+
+         const abx = bx - ax;
+         const aby = by - ay;
+         const abz = bz - az;
+         const acx = cx - ax;
+         const acy = cy - ay;
+         const acz = cz - az;
+         const nx = aby * acz - abz * acy;
+         const ny = abz * acx - abx * acz;
+         const nz = abx * acy - aby * acx;
+         const centerX = (ax + bx + cx) / 3;
+         const centerY = (ay + by + cy) / 3;
+         const centerZ = (az + bz + cz) / 3;
+         const outwardDot = nx * (centerX - centroidX) + ny * (centerY - centroidY) + nz * (centerZ - centroidZ);
+         if (outwardDot < 0) {
+            [bx, cx] = [cx, bx];
+            [by, cy] = [cy, by];
+            [bz, cz] = [cz, bz];
+         }
+
+         signedVolume += (
+            ax * (by * cz - bz * cy)
+            + ay * (bz * cx - bx * cz)
+            + az * (bx * cy - by * cx)
+         ) / 6;
+      }
+
+      const volume = Math.abs(signedVolume);
+      return Number.isFinite(volume) && volume > 0 ? volume : null;
    }
 
    function setDesignSizeCalculatorStatus(text) {
@@ -1449,6 +1583,29 @@ async function setupApp() {
          upperMm: summary.uw * widthMm,
          tableMm: summary.tw * widthMm,
          heightMm: summary.cw * widthMm + summary.pw * widthMm + girdleMm,
+         volumeMm3: (() => {
+            const widthUnits = computeStoneWidthUnits(currentStone);
+            const volumeUnits = computeStoneMeshVolumeUnits(currentStone);
+            if (!Number.isFinite(widthUnits) || widthUnits <= 0 || !Number.isFinite(volumeUnits) || volumeUnits <= 0) {
+               return null;
+            }
+            const scale = widthMm / widthUnits;
+            const volumeMm3 = volumeUnits * scale * scale * scale;
+            return Number.isFinite(volumeMm3) && volumeMm3 > 0 ? volumeMm3 : null;
+         })(),
+         weightCt: (() => {
+            const specificGravity = parseFloat(designSizeSgValueEl?.value ?? '');
+            const widthUnits = computeStoneWidthUnits(currentStone);
+            const volumeUnits = computeStoneMeshVolumeUnits(currentStone);
+            if (!Number.isFinite(specificGravity) || specificGravity <= 0) return null;
+            if (!Number.isFinite(widthUnits) || widthUnits <= 0 || !Number.isFinite(volumeUnits) || volumeUnits <= 0) {
+               return null;
+            }
+            const scale = widthMm / widthUnits;
+            const volumeMm3 = volumeUnits * scale * scale * scale;
+            const weightCt = (volumeMm3 * specificGravity) / 200;
+            return Number.isFinite(weightCt) && weightCt > 0 ? weightCt : null;
+         })(),
       };
    }
 
@@ -1468,6 +1625,8 @@ async function setupApp() {
       setDesignSizeValue(designSizeUEl, result.upperMm);
       setDesignSizeValue(designSizeTEl, result.tableMm);
       setDesignSizeValue(designSizeHEl, result.heightMm);
+      setDesignSizeValue(designSizeVEl, result.volumeMm3);
+      setDesignSizeValue(designSizeCtEl, result.weightCt);
       designSizeOverlayWidthMm = result.widthMm;
       setDesignSizeCalculatorStatus(`Solved from ${result.driverType} = ${result.driverValue.toFixed(3)} mm`);
    }
@@ -5250,6 +5409,7 @@ async function setupApp() {
    designSizeDriverTypeEl?.addEventListener('change', refreshDesignSizeCalculator);
    designSizeDriverValueEl?.addEventListener('input', refreshDesignSizeCalculator);
    designSizeGValueEl?.addEventListener('input', refreshDesignSizeCalculator);
+   designSizeSgValueEl?.addEventListener('input', refreshDesignSizeCalculator);
    refreshDesignSizeCalculator();
 
    let suspendScaleAdjust = false;
