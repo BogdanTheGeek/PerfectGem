@@ -29,9 +29,13 @@ import {
 } from './geometry.js';
 import { exportInProgress, setupExporter } from './video.js';
 import { renderOrtho } from './ortho.js';
+import { createFrameProvider, createRendererBackend, FRAME_CAPABILITIES } from './renderer/contracts.js';
+import { sampleSoftwareGraphSweep } from './renderer/software-graph-sampler.js';
+import { packWebGPUUniforms } from './renderer/webgpu-uniforms.js';
+import { loadWebGPUShaderSources } from './renderer/webgpu-shaders.js';
+import { setupWebGLRendererApp } from './renderer/webgl-backend.js';
 
-const shaderSource = await (await fetch('shaders.wgsl')).text();
-const computeShaderSource = await (await fetch('compute.wgsl')).text();
+const { renderShaderSource: shaderSource, graphComputeShaderSource: computeShaderSource } = await loadWebGPUShaderSources();
 // Toggle debug overlays/features
 var DEBUG = true;
 
@@ -482,6 +486,453 @@ function requestRender() {
    if (framePending) return;
    framePending = true;
    requestAnimationFrame(frame);
+}
+
+function createRendererStatusLabel(text) {
+   const label = document.createElement('div');
+   label.textContent = text;
+   label.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:100;color:#ddd;background:rgba(0,0,0,.7);padding:6px 9px;border-radius:6px;font:12px system-ui;';
+   document.body.appendChild(label);
+}
+
+async function loadStoneFromUrl(filename, url) {
+   const ext = filename.toLowerCase().match(/\.\w+$/)?.[0] ?? '';
+   const response = await fetch(url);
+   const data = await response.arrayBuffer();
+   let stone;
+   switch (ext) {
+      case '.gem': stone = await loadGEM(data); break;
+      case '.gcs': stone = await loadGCS(data); break;
+      case '.asc': stone = await loadASC(data); break;
+      default: stone = await loadSTL(data); break;
+   }
+   normalizeStoneToUnitSphere(stone);
+   return stone;
+}
+
+function installFallbackPointerControls(canvas, app) {
+   let dragging = false;
+   let dragPointerId = null;
+   let lastX = 0;
+   let lastY = 0;
+   const sensitivity = 0.01;
+
+   const endDrag = (event) => {
+      if (!dragging) return;
+      if (event && dragPointerId !== null && event.pointerId !== dragPointerId) return;
+      dragging = false;
+      dragPointerId = null;
+   };
+
+   canvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      dragging = true;
+      dragPointerId = event.pointerId;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      canvas.setPointerCapture(event.pointerId);
+   });
+   canvas.addEventListener('pointerup', endDrag);
+   canvas.addEventListener('pointercancel', endDrag);
+   canvas.addEventListener('pointerleave', endDrag);
+   canvas.addEventListener('pointermove', (event) => {
+      if (!dragging || event.pointerId !== dragPointerId) return;
+      const dx = event.clientX - lastX;
+      const dy = event.clientY - lastY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      const current = app.getRotation?.() || { x: 0, y: 0 };
+      app.setRotation?.(current.x + dy * sensitivity, current.y + dx * sensitivity);
+   });
+}
+
+function setupFallbackUiBindings(app) {
+   if (uiControls) return uiControls;
+   uiControls = buildUI(ui, {
+      onRenderOutputChanged() { app.requestRender?.(); },
+      onGraphParamsChanged() { app.requestRender?.(); },
+      onRenderScaleChanged() { app.requestRender?.(); },
+      onGemTopTabChanged() { },
+      onCutsNavigate() { },
+      onReset() { app.resetView?.(); },
+      onTilt() { return app.toggleTilt?.() ?? false; },
+      onFileSelected(name, fileUrl) { app.loadModel(name, fileUrl); },
+      async captureRenderedFrameForPrint() {
+         return app.captureStill?.() || '';
+      },
+   });
+   return uiControls;
+}
+
+let fallbackScalingControls = null;
+function setupFallbackScalingControls(app) {
+   if (fallbackScalingControls) return fallbackScalingControls;
+   const crownSlider = document.getElementById('designCrownRatioSlider');
+   const pavilionSlider = document.getElementById('designPavilionRatioSlider');
+   const crownLabel = document.getElementById('designCrownRatio');
+   const pavilionLabel = document.getElementById('designPavilionRatio');
+   const applyButton = document.getElementById('designApplyScaleBtn');
+   const resetButton = document.getElementById('designResetScaleBtn');
+   let sourceStone = null;
+   let filename = '';
+
+   const applyPreview = () => {
+      if (!sourceStone) return;
+      const crown = parseFloat(crownSlider?.value) || 1;
+      const pavilion = parseFloat(pavilionSlider?.value) || 1;
+      let scaled = sourceStone;
+      if (Math.abs(crown - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, crown, true);
+      if (Math.abs(pavilion - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, pavilion, false);
+      app.setStone?.(filename, scaled);
+      app.requestRender?.();
+      if (designStatusEl) designStatusEl.textContent = `Scale preview crown=${crown.toFixed(3)} pavilion=${pavilion.toFixed(3)}`;
+   };
+
+   const updatePreview = () => {
+      if (crownLabel) crownLabel.textContent = (parseFloat(crownSlider?.value) || 1).toFixed(3);
+      if (pavilionLabel) pavilionLabel.textContent = (parseFloat(pavilionSlider?.value) || 1).toFixed(3);
+      applyPreview();
+   };
+
+   crownSlider?.addEventListener('input', updatePreview);
+   pavilionSlider?.addEventListener('input', updatePreview);
+   applyButton?.addEventListener('click', () => {
+      if (!sourceStone) return;
+      const crown = parseFloat(crownSlider?.value) || 1;
+      const pavilion = parseFloat(pavilionSlider?.value) || 1;
+      let scaled = sourceStone;
+      if (Math.abs(crown - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, crown, true);
+      if (Math.abs(pavilion - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, pavilion, false);
+      sourceStone = scaled;
+      app.setStone?.(filename, sourceStone);
+      crownSlider.value = '1';
+      pavilionSlider.value = '1';
+      updatePreview();
+      if (designStatusEl) designStatusEl.textContent = 'Scale applied';
+   });
+   resetButton?.addEventListener('click', () => {
+      if (!sourceStone) return;
+      crownSlider.value = '1';
+      pavilionSlider.value = '1';
+      updatePreview();
+      if (designStatusEl) designStatusEl.textContent = 'Scale reset';
+   });
+
+   fallbackScalingControls = {
+      setSourceStone(nextFilename, stone) {
+         filename = nextFilename;
+         sourceStone = stone;
+      },
+   };
+   return fallbackScalingControls;
+}
+
+function populateFallbackModelUi(filename, stone) {
+   if (stone.refractiveIndex && stone.refractiveIndex > 1) uiControls?.setRI(stone.refractiveIndex);
+   if (stone.dispersion != null) uiControls?.setCOD(stone.dispersion);
+   uiControls?.setFileName(filename);
+
+   if (facetListEl) facetListEl.innerHTML = buildFacetInfo(stone);
+   if (facetStatusEl) {
+      facetStatusEl.textContent = Array.isArray(stone.facets) && stone.facets.length
+         ? `${stone.facets.length} facets parsed from ${filename}`
+         : `No facet notes found in ${filename}`;
+   }
+   if (Number.isFinite(stone.sourceGear) && stone.sourceGear > 0) {
+      designGearEl.value = String(stone.sourceGear);
+   }
+   setMetadataToDesign(stone.metadata || {});
+}
+
+let fallbackFacetTabsBound = false;
+function setupFallbackFacetTabs() {
+   if (fallbackFacetTabsBound) return;
+   fallbackFacetTabsBound = true;
+   const setTab = (tabName) => {
+      const isEdit = tabName === 'edit';
+      facetEditPanelEl?.classList.toggle('active', isEdit);
+      facetInstructionsPanelEl?.classList.toggle('active', !isEdit);
+      facetSplitTabsEl?.querySelectorAll('.tabBtn[data-facet-tab]').forEach((button) => {
+         button.classList.toggle('active', button.dataset.facetTab === (isEdit ? 'edit' : 'instructions'));
+      });
+   };
+   facetSplitTabsEl?.addEventListener('click', (event) => {
+      const button = event.target.closest('.tabBtn[data-facet-tab]');
+      if (button) setTab(button.dataset.facetTab);
+   });
+   setTab('instructions');
+}
+
+let fallbackPanelsBound = false;
+function setupFallbackPanelBindings() {
+   if (fallbackPanelsBound) return;
+   fallbackPanelsBound = true;
+   const bindings = [
+      [lightReturnPanel, graphToggleEl],
+      [facetPanel, facetToggleEl],
+      [gemLibraryPanel, gemLibraryToggleEl],
+      [designPanel, designToggleEl],
+   ];
+   for (const [panelEl, toggleEl] of bindings) {
+      if (!panelEl || !toggleEl) continue;
+      toggleEl.addEventListener('click', () => {
+         const collapsed = panelEl.classList.toggle('collapsed');
+         toggleEl.textContent = collapsed ? '+' : '−';
+      });
+   }
+}
+
+let fallbackPanelLayoutBound = false;
+function setupFallbackPanelLayoutControls() {
+   if (fallbackPanelLayoutBound) return;
+   fallbackPanelLayoutBound = true;
+   const panels = [
+      { panel: graphPanel, header: graphHeaderEl, handles: [graphResizeEl, graphResizeRightEl], minWidth: 260 },
+      { panel: facetPanel, header: facetHeaderEl, handles: [facetResizeEl, facetResizeRightEl], minWidth: 260 },
+      { panel: gemLibraryPanel, header: gemLibraryHeaderEl, handles: [gemLibraryResizeEl, gemLibraryResizeRightEl], minWidth: 480 },
+   ];
+
+   for (const { panel: panelEl, header, handles, minWidth } of panels) {
+      if (!panelEl || !header) continue;
+      let drag = null;
+      header.addEventListener('pointerdown', (event) => {
+         if (event.target.closest('button, input, select, textarea, .designBtn')) return;
+         if (window.innerWidth <= 960) return;
+         const rect = panelEl.getBoundingClientRect();
+         drag = { pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
+         panelEl.style.position = 'fixed';
+         panelEl.style.right = 'auto';
+         panelEl.style.bottom = 'auto';
+         header.setPointerCapture(event.pointerId);
+      });
+      header.addEventListener('pointermove', (event) => {
+         if (!drag || event.pointerId !== drag.pointerId) return;
+         const left = Math.max(0, Math.min(window.innerWidth - 80, event.clientX - drag.offsetX));
+         const top = Math.max(0, Math.min(window.innerHeight - 40, event.clientY - drag.offsetY));
+         panelEl.style.left = `${Math.round(left)}px`;
+         panelEl.style.top = `${Math.round(top)}px`;
+      });
+      const endDrag = (event) => {
+         if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+         drag = null;
+      };
+      header.addEventListener('pointerup', endDrag);
+      header.addEventListener('pointercancel', endDrag);
+
+      for (const handle of handles.filter(Boolean)) {
+         let resize = null;
+         handle.addEventListener('pointerdown', (event) => {
+            if (panelEl.classList.contains('collapsed') || window.innerWidth <= 960) return;
+            event.preventDefault();
+            const rect = panelEl.getBoundingClientRect();
+            resize = {
+               pointerId: event.pointerId,
+               left: rect.left,
+               top: rect.top,
+               right: rect.right,
+               fromRight: handle === handles[1],
+            };
+            handle.setPointerCapture(event.pointerId);
+         });
+         handle.addEventListener('pointermove', (event) => {
+            if (!resize || event.pointerId !== resize.pointerId) return;
+            const width = Math.max(minWidth, Math.round(resize.fromRight
+               ? event.clientX - resize.left
+               : resize.right - event.clientX));
+            const height = Math.max(120, Math.round(event.clientY - resize.top));
+            panelEl.style.position = 'fixed';
+            panelEl.style.right = 'auto';
+            if (!resize.fromRight) panelEl.style.left = `${Math.max(0, resize.right - width)}px`;
+            panelEl.style.width = `${width}px`;
+            panelEl.style.height = `${height}px`;
+         });
+         const endResize = (event) => {
+            if (!resize || (event && event.pointerId !== resize.pointerId)) return;
+            resize = null;
+         };
+         handle.addEventListener('pointerup', endResize);
+         handle.addEventListener('pointercancel', endResize);
+      }
+   }
+}
+
+let fallbackDesignNoticeBound = false;
+function setupFallbackDesignNotice() {
+   if (fallbackDesignNoticeBound) return;
+   fallbackDesignNoticeBound = true;
+   const unsupportedMessage = 'Scale editing requires the WebGPU renderer right now.';
+   const notify = () => {
+      if (designStatusEl) designStatusEl.textContent = unsupportedMessage;
+   };
+   designApplyScaleBtn?.addEventListener('click', notify);
+   designResetScaleBtn?.addEventListener('click', notify);
+}
+
+function stoneToOrthoFaces(stone) {
+   const faces = [];
+   const vertexData = stone?.vertexData;
+   if (!(vertexData instanceof Float32Array)) return faces;
+   for (let offset = 0; offset + 20 < vertexData.length; offset += 21) {
+      const normal = [vertexData[offset + 3], vertexData[offset + 4], vertexData[offset + 5]];
+      faces.push({
+         name: '',
+         normal,
+         angleDeg: Math.acos(Math.min(1, Math.abs(normal[2] || 0))) * 180 / Math.PI,
+         signedAngleDeg: computeSignedFacetAngleDeg(normal),
+         vertices: [
+            [vertexData[offset], vertexData[offset + 1], vertexData[offset + 2]],
+            [vertexData[offset + 7], vertexData[offset + 8], vertexData[offset + 9]],
+            [vertexData[offset + 14], vertexData[offset + 15], vertexData[offset + 16]],
+         ],
+      });
+   }
+   return faces;
+}
+
+async function setupOrthoPreviewApp() {
+   const canvas = document.getElementById('gpuCanvas');
+   createRendererStatusLabel('Renderer: software (orthographic preview)');
+
+   let stone = null;
+   let currentRotX = 0;
+   let currentRotY = 0;
+   let framePending = false;
+   let tiltAnimating = false;
+   let tiltBaseX = 0;
+   let tiltBaseY = 0;
+   let tiltStartTs = 0;
+
+   function viewVectorFromRotation(rotX, rotY) {
+      const sx = Math.sin(rotX);
+      const cx = Math.cos(rotX);
+      const sy = Math.sin(rotY);
+      const cy = Math.cos(rotY);
+      return [sy * cx, -sx, cy * cx];
+   }
+
+   const draw = () => {
+      if (!stone) return;
+      canvas.width = Math.max(2, Math.floor(window.innerWidth * window.devicePixelRatio));
+      canvas.height = Math.max(2, Math.floor(window.innerHeight * window.devicePixelRatio));
+      canvas.style.width = '100vw';
+      canvas.style.height = '100vh';
+      canvas.style.left = '0';
+      canvas.style.top = '0';
+      renderOrtho(
+         stoneToOrthoFaces(stone),
+         viewVectorFromRotation(currentRotX, currentRotY),
+         canvas,
+         1 / Math.max(0.1, computeMeshBoundsRadius(stone.vertexData)),
+         stone.sourceGear || 96,
+      );
+   };
+
+   function requestRender() {
+      if (framePending) return;
+      framePending = true;
+      requestAnimationFrame(() => {
+         framePending = false;
+         draw();
+      });
+   }
+
+   function stopTilt() {
+      tiltAnimating = false;
+   }
+
+   function tickTilt(timestamp) {
+      if (!tiltAnimating) return;
+      if (!tiltStartTs) tiltStartTs = timestamp;
+      const elapsedSec = (timestamp - tiltStartTs) / 1000;
+      const amp = (ui.tiltAngleDeg || 10) * Math.PI / 180;
+      currentRotX = tiltBaseX + Math.sin(elapsedSec * Math.PI) * amp;
+      currentRotY = tiltBaseY + Math.cos(elapsedSec * Math.PI) * amp;
+      draw();
+      requestAnimationFrame(tickTilt);
+   }
+
+   const app = {
+      async loadModel(filename, url) {
+         stone = await loadStoneFromUrl(filename, url);
+         fallbackScalingControls?.setSourceStone(filename, stone);
+         populateFallbackModelUi(filename, stone);
+         requestRender();
+      },
+      setStone(filename, nextStone) {
+         stone = nextStone;
+         populateFallbackModelUi(filename, stone);
+         requestRender();
+      },
+      requestRender,
+      setRotation(rotX, rotY) {
+         stopTilt();
+         currentRotX = rotX;
+         currentRotY = rotY;
+         requestRender();
+      },
+      getRotation() {
+         return { x: currentRotX, y: currentRotY };
+      },
+      resetView() {
+         stopTilt();
+         currentRotX = 0;
+         currentRotY = 0;
+         requestRender();
+      },
+      toggleTilt() {
+         if (tiltAnimating) {
+            stopTilt();
+            return false;
+         }
+         tiltAnimating = true;
+         tiltBaseX = currentRotX;
+         tiltBaseY = currentRotY;
+         tiltStartTs = 0;
+         requestAnimationFrame(tickTilt);
+         return true;
+      },
+      captureStill() {
+         return canvas.toDataURL('image/png');
+      },
+      setUiState() {
+         requestRender();
+      },
+      renderer: 'software',
+   };
+
+   setupFallbackUiBindings(app);
+   setupFallbackFacetTabs();
+   setupFallbackPanelBindings();
+   setupFallbackPanelLayoutControls();
+   setupFallbackScalingControls(app);
+   installFallbackPointerControls(canvas, app);
+   window.addEventListener('resize', requestRender);
+   return app;
+}
+
+async function setupWebGLPreviewApp() {
+   const app = await setupWebGLRendererApp({
+      canvas: document.getElementById('gpuCanvas'),
+      mat4,
+      loadStoneFromUrl,
+      computeMeshBoundsRadius,
+      createStatusLabel: createRendererStatusLabel,
+   });
+   if (!app) return null;
+   const originalLoadModel = app.loadModel.bind(app);
+   app.loadModel = async (filename, url) => {
+      const stone = await originalLoadModel(filename, url);
+      fallbackScalingControls?.setSourceStone(filename, stone);
+      populateFallbackModelUi(filename, stone);
+   };
+   app.setUiState?.(ui);
+   setupFallbackUiBindings(app);
+   setupFallbackFacetTabs();
+   setupFallbackPanelBindings();
+   setupFallbackPanelLayoutControls();
+   setupFallbackScalingControls(app);
+   installFallbackPointerControls(document.getElementById('gpuCanvas'), app);
+   return app;
 }
 
 function clampRenderScale(scale, maxScale) {
@@ -1024,9 +1475,9 @@ function buildUI(ui, cbs) {
 
       let stoneRenderImg = '';
       try {
-         const raytraceDataUrl = await cbs.captureRaytracedStoneForPrint?.();
-         if (raytraceDataUrl) {
-            stoneRenderImg = `<img id="stoneRender" src="${raytraceDataUrl}" class="stoneRender">`;
+         const renderedFrameDataUrl = await cbs.captureRenderedFrameForPrint?.();
+         if (renderedFrameDataUrl) {
+            stoneRenderImg = `<img id="stoneRender" src="${renderedFrameDataUrl}" class="stoneRender">`;
          }
       } catch (err) {
          console.error('printPreview: failed to capture raytraced stone image', err);
@@ -1172,9 +1623,9 @@ ${stoneRenderImg}
 }
 
 // ---------------------------------------------------------------------------
-// setupApp — one-time WebGPU + UI init; returns { loadModel }
+// setupWebGPUApp — one-time WebGPU + UI init; returns { loadModel }
 // ---------------------------------------------------------------------------
-async function setupApp() {
+async function setupWebGPUApp() {
    const canvas = document.getElementById('gpuCanvas');
    const isMobileDevice =
       navigator.userAgentData?.mobile
@@ -1195,10 +1646,7 @@ async function setupApp() {
       device = await adapter?.requestDevice();
    }
 
-   if (!device) {
-      alert('WebGPU is not supported. Try a different browser.');
-      return null;
-   }
+   if (!device) return null;
 
    const context = canvas.getContext('webgpu');
    const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
@@ -1306,6 +1754,82 @@ async function setupApp() {
          module: computeReduceShaderModule,
          entryPoint: 'cs_reduce_graph',
       },
+   });
+
+   const frameProvider = createFrameProvider({
+      capabilities: new Set([FRAME_CAPABILITIES.CANVAS]),
+      maxTextureDimension2D: device.limits.maxTextureDimension2D,
+      viewportSize: () => ({ width: canvas.width, height: canvas.height }),
+      createTarget({ width, height }) {
+         const targetCanvas = document.createElement('canvas');
+         targetCanvas.width = width;
+         targetCanvas.height = height;
+         const targetContext = targetCanvas.getContext('webgpu');
+         if (!targetContext) {
+            throw new Error('Unable to create a WebGPU frame target.');
+         }
+         targetContext.configure({
+            device,
+            format: canvasFormat,
+            alphaMode: 'opaque',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+         });
+         const targetDepthTexture = device.createTexture({
+            size: [width, height],
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+         });
+
+         return Object.freeze({
+            canvas: targetCanvas,
+            async renderFrame({ renderBundle: bundle, uniformData, backgroundColor }) {
+               if (!bundle) throw new Error('No model loaded for frame rendering.');
+               device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+               const commandEncoder = device.createCommandEncoder();
+               const renderPass = commandEncoder.beginRenderPass({
+                  colorAttachments: [{
+                     view: targetContext.getCurrentTexture().createView(),
+                     clearValue: {
+                        r: backgroundColor[0],
+                        g: backgroundColor[1],
+                        b: backgroundColor[2],
+                        a: 1.0,
+                     },
+                     loadOp: 'clear',
+                     storeOp: 'store',
+                  }],
+                  depthStencilAttachment: {
+                     view: targetDepthTexture.createView(),
+                     depthClearValue: 1.0,
+                     depthLoadOp: 'clear',
+                     depthStoreOp: 'discard',
+                  },
+               });
+               renderPass.setPipeline(pipeline);
+               renderPass.setBindGroup(0, bundle.bindGroup);
+               renderPass.setVertexBuffer(0, bundle.vertexBuffer);
+               renderPass.draw(bundle.triCount * 3);
+               renderPass.end();
+               device.queue.submit([commandEncoder.finish()]);
+               await device.queue.onSubmittedWorkDone();
+            },
+            dispose() {
+               targetDepthTexture.destroy();
+            },
+         });
+      },
+   });
+   const rendererBackend = createRendererBackend({
+      id: 'webgpu',
+      capabilities: {
+         frameProvider,
+         graphAcceleration: true,
+         stillCapture: true,
+      },
+      loadMesh: (filename, stone, options) => applyStoneData(filename, stone, options),
+      renderFrame: ({ target, ...frame }) => target.renderFrame(frame),
+      sampleGraph: (runId) => sampleGraphSweep(runId),
+      captureStill: () => canvas.toDataURL('image/png'),
    });
 
    // --- Depth texture (recreated on resize) ---
@@ -4649,72 +5173,29 @@ async function setupApp() {
    }
 
    function packUniformData(out, modelMatrix, projectionMatrix, time, lightMode, graphMode, flatShading) {
-      out.set(modelMatrix, 0);
-      out.set(viewMat, 16);
-      out.set(projectionMatrix, 32);
-
-      out[48] = cameraPos[0];
-      out[49] = cameraPos[1];
-      out[50] = cameraPos[2];
-      out[51] = ui.clarity;
-
-      out[52] = time;
-      out[53] = ui.ri;
-      out[54] = ui.cod;
-      out[55] = lightMode;
-
-      out[56] = ui.axisAColor[0];
-      out[57] = ui.axisAColor[1];
-      out[58] = ui.axisAColor[2];
-      out[59] = graphMode;
-
-      out[60] = ui.axisBColor[0];
-      out[61] = ui.axisBColor[1];
-      out[62] = ui.axisBColor[2];
-      out[63] = ui.exitStrength;
-
-      // 256: axisCColor vec3, 268: flatShading
-      out[64] = ui.axisCColor[0];
-      out[65] = ui.axisCColor[1];
-      out[66] = ui.axisCColor[2];
-      out[67] = flatShading;
-
-      // 272: exitHighlight vec3, 284: convexFacetMode
-      out[68] = ui.exitHighlight[0];
-      out[69] = ui.exitHighlight[1];
-      out[70] = ui.exitHighlight[2];
-      out[71] = ui.convexFacetMode;
-
-      // 288: headShadowColor vec3, 300: padding
-      out[72] = ui.headShadowColor[0];
-      out[73] = ui.headShadowColor[1];
-      out[74] = ui.headShadowColor[2];
-      out[75] = 0.0;
-
-      // Compose local-space orientation quaternion q = qz * qy * qx from slider angles.
-      let xRad = ui.axisTiltXDeg * Math.PI / 180.0;
-      let yRad = ui.axisTiltYDeg * Math.PI / 180.0;
-      let zRad = ui.axisTiltZDeg * Math.PI / 180.0;
-      let hx = 0.5 * xRad;
-      let hy = 0.5 * yRad;
-      let hz = 0.5 * zRad;
-      let sx = Math.sin(hx);
-      let cx = Math.cos(hx);
-      let sy = Math.sin(hy);
-      let cy = Math.cos(hy);
-      let sz = Math.sin(hz);
-      let cz = Math.cos(hz);
-      let qx = sx * cy * cz - cx * sy * sz;
-      let qy = cx * sy * cz + sx * cy * sz;
-      let qz = cx * cy * sz - sx * sy * cz;
-      let qw = cx * cy * cz + sx * sy * sz;
-      let qLenInv = 1.0 / Math.hypot(qx, qy, qz, qw);
-      // 304: axisQuat vec4
-      out[76] = qx * qLenInv;
-      out[77] = qy * qLenInv;
-      out[78] = qz * qLenInv;
-      out[79] = qw * qLenInv;
-
+      packWebGPUUniforms(out, {
+         modelMatrix,
+         viewMatrix: viewMat,
+         projectionMatrix,
+         cameraPosition: cameraPos,
+         material: {
+            clarity: ui.clarity,
+            ri: ui.ri,
+            cod: ui.cod,
+            axisAColor: ui.axisAColor,
+            axisBColor: ui.axisBColor,
+            axisCColor: ui.axisCColor,
+            exitStrength: ui.exitStrength,
+            exitHighlight: ui.exitHighlight,
+            convexFacetMode: ui.convexFacetMode,
+            headShadowColor: ui.headShadowColor,
+            axisTiltDeg: [ui.axisTiltXDeg, ui.axisTiltYDeg, ui.axisTiltZDeg],
+         },
+         time,
+         lightMode,
+         graphMode,
+         flatShading,
+      });
    }
 
    function writeUniformsToBuffer(buffer, modelMatrix, projectionMatrix, time, lightMode, graphMode = 0.0) {
@@ -4867,7 +5348,19 @@ async function setupApp() {
    async function recomputeGraph(runId) {
       if (!renderBundle) return;
 
-      const seriesList = await sampleGraphSweep(runId);
+      let seriesList = null;
+      try {
+         seriesList = await rendererBackend.sampleGraph(runId);
+      } catch (error) {
+         console.warn('WebGPU graph acceleration failed; using software graph sampler.', error);
+         if (runId !== graphRequestId) return;
+         seriesList = sampleSoftwareGraphSweep({
+            vertexData: currentStone?.vertexData,
+            tiltValues: GRAPH_TILT_VALUES,
+            modes: GRAPH_MODES,
+            hasTableFacet: modelHasTableFacet,
+         });
+      }
       if (!seriesList) return;
 
       if (runId !== graphRequestId) return;
@@ -5533,7 +6026,7 @@ async function setupApp() {
 
       normalizeStoneToUnitSphere(stone);
 
-      await applyStoneData(filename, stone, { syncDesignFromStone: true, isDesign: false });
+      await rendererBackend.loadMesh(filename, stone, { syncDesignFromStone: true, isDesign: false });
 
       // If a new model is loaded while Cuts is active, restore should target this model,
       // not the model that was active before entering Cuts.
@@ -5638,7 +6131,7 @@ async function setupApp() {
          queueCutsNavigation(kind, 0);
       },
       onFileSelected(name, fileUrl) { loadModel(name, fileUrl); },
-      async captureRaytracedStoneForPrint() {
+      async captureRenderedFrameForPrint() {
          if (!renderBundle) return '';
 
          const prevBackground = [...ui.backgroundColor];
@@ -5651,7 +6144,7 @@ async function setupApp() {
          requestRender();
 
          await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-         const raytraceDataUrl = canvas.toDataURL('image/png');
+         const raytraceDataUrl = rendererBackend.captureStill();
 
          ui.backgroundColor = prevBackground;
          if (bgColorInput) bgColorInput.value = rgbToHex(prevBackground);
@@ -5665,11 +6158,7 @@ async function setupApp() {
 
    setupExporter(ui, () => ({
       renderBundle,
-      device,
-      canvas,
-      canvasFormat,
-      pipeline,
-      uniformBuffer,
+      frameProvider,
       mat4,
       currentModelFilename,
       currentRotX,
@@ -6370,12 +6859,47 @@ async function setupApp() {
    resize();
    requestRender();
 
-   return { loadModel };
+   return { loadModel, renderer: 'webgpu' };
 }
 
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
+function getRendererPreferenceFromLocation() {
+   const params = new URLSearchParams(window.location.search || '');
+   const raw = String(params.get('renderer') || '').trim().toLowerCase();
+   if (raw === 'webgpu' || raw === 'webgl' || raw === 'software') return raw;
+   return null;
+}
+
+function getRendererAttemptOrder(preferredRenderer) {
+   if (!preferredRenderer) return ['webgpu', 'webgl', 'software'];
+   if (preferredRenderer === 'webgpu') return ['webgpu', 'webgl', 'software'];
+   if (preferredRenderer === 'webgl') return ['webgl', 'software'];
+   if (preferredRenderer === 'software') return ['software'];
+   return ['webgpu', 'webgl', 'software'];
+}
+
+async function setupAppWithRendererFallback(preferredRenderer) {
+   const attempts = getRendererAttemptOrder(preferredRenderer);
+   for (const renderer of attempts) {
+      try {
+         if (renderer === 'webgpu') {
+            const app = await setupWebGPUApp();
+            if (app) return app;
+         } else if (renderer === 'webgl') {
+            const app = await setupWebGLPreviewApp();
+            if (app) return app;
+         } else if (renderer === 'software') {
+            return setupOrthoPreviewApp();
+         }
+      } catch (error) {
+         console.warn(`Renderer ${renderer} failed; trying fallback.`, error);
+      }
+   }
+   return null;
+}
+
 function getStartupModelFromLocation(defaultName, defaultUrl) {
    const params = new URLSearchParams(window.location.search || '');
    let candidate = params.get('url') || params.get('file') || params.get('model');
@@ -6408,7 +6932,8 @@ function getStartupModelFromLocation(defaultName, defaultUrl) {
    return { name: derivedName, url: resolvedUrl, fromQuery: true };
 }
 
-const app = await setupApp();
+const preferredRenderer = getRendererPreferenceFromLocation();
+const app = await setupAppWithRendererFallback(preferredRenderer);
 if (app) {
    const defaultName = 'Eye_of_Zul.asc';
    const defaultUrl = './models/Eye_of_Zul.asc';
@@ -6422,4 +6947,6 @@ if (app) {
          await app.loadModel(defaultName, defaultUrl);
       }
    }
+} else {
+   alert('No supported renderer backend is available.');
 }

@@ -12,7 +12,11 @@ import {
    buildDesignGcsText,
    buildDesignAscText,
    buildDesignGemBuffer,
+   stretchStoneByVertices,
 } from './loaders.js';
+import { createFrameProvider, FRAME_CAPABILITIES } from './renderer/contracts.js';
+import { sampleSoftwareGraphSweep } from './renderer/software-graph-sampler.js';
+import { packWebGPUUniforms } from './renderer/webgpu-uniforms.js';
 
 // list all files in models folder
 import fs from 'fs';
@@ -111,8 +115,76 @@ async function loadStoneFromModelFile(file) {
    throw new Error(`Unsupported file type: ${ext}`);
 }
 
+function testRendererContracts() {
+   const provider = createFrameProvider({
+      capabilities: new Set([FRAME_CAPABILITIES.CANVAS]),
+      maxTextureDimension2D: 4096,
+      viewportSize: () => ({ width: 640, height: 480 }),
+      createTarget: () => ({ canvas: {}, renderFrame: async () => {}, dispose: () => {} }),
+   });
+   if (!provider.capabilities.has(FRAME_CAPABILITIES.CANVAS) || provider.viewportSize.width !== 640) {
+      throw new Error('Frame provider contract did not preserve renderer capabilities.');
+   }
+
+   const vertexData = new Float32Array([
+      0, 0, 0, 0, 0, 1, 0,
+      1, 0, 0, 0, 0, 1, 0,
+      0, 1, 0, 0, 0, 1, 0,
+   ]);
+   const graph = sampleSoftwareGraphSweep({
+      vertexData,
+      tiltValues: [-10, 0, 10],
+      modes: [{ label: 'ISO', color: '#fff' }],
+      hasTableFacet: true,
+   });
+   if (graph.length !== 2 || graph.some((series) => series.points.length !== 3)) {
+      throw new Error('Software graph fallback returned an invalid graph shape.');
+   }
+
+   const uniforms = new Float32Array(80);
+   packWebGPUUniforms(uniforms, {
+      modelMatrix: new Float32Array(16).fill(1),
+      viewMatrix: new Float32Array(16).fill(2),
+      projectionMatrix: new Float32Array(16).fill(3),
+      cameraPosition: [4, 5, 6],
+      material: {
+         clarity: 0.5,
+         ri: 1.5,
+         cod: 0.02,
+         axisAColor: [1, 0, 0],
+         axisBColor: [0, 1, 0],
+         axisCColor: [0, 0, 1],
+         exitStrength: 0.1,
+         exitHighlight: [0.2, 0.3, 0.4],
+         convexFacetMode: 1,
+         headShadowColor: [0.5, 0.6, 0.7],
+         axisTiltDeg: [0, 0, 0],
+      },
+      time: 1,
+      lightMode: 2,
+      graphMode: 0,
+      flatShading: 0,
+   });
+   if (uniforms[48] !== 4 || uniforms[55] !== 2 || uniforms[79] !== 1) {
+      throw new Error('WebGPU uniform packing layout changed unexpectedly.');
+   }
+}
+
+async function testRendererNeutralScaling() {
+   const stone = await loadStoneFromModelFile('Eye_of_Zul.asc');
+   const scaled = stretchStoneByVertices(stone, 1.15, true);
+   if (!(scaled.vertexData instanceof Float32Array) || scaled.triangleCount <= 0) {
+      throw new Error('Renderer-neutral crown scaling did not produce mesh data.');
+   }
+   if (scaled === stone) {
+      throw new Error('Renderer-neutral crown scaling did not transform the stone.');
+   }
+}
+
 
 async function test() {
+   testRendererContracts();
+   await testRendererNeutralScaling();
    const args = process.argv.slice(2);
    const files = fs.readdirSync('./models');
    let results = {};
@@ -183,4 +255,3 @@ async function test() {
 }
 
 test();
-

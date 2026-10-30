@@ -397,11 +397,7 @@ function validateExporterRuntime(runtime) {
    if (!runtime) throw new Error('Exporter runtime unavailable.');
    const requiredKeys = [
       'renderBundle',
-      'device',
-      'canvas',
-      'canvasFormat',
-      'pipeline',
-      'uniformBuffer',
+      'frameProvider',
       'mat4',
       'currentModelFilename',
       'currentRotX',
@@ -437,11 +433,7 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
    }
 
    const {
-      device,
-      canvas,
-      canvasFormat,
-      pipeline,
-      uniformBuffer,
+      frameProvider,
       mat4,
       currentModelFilename,
       currentRotX,
@@ -462,6 +454,10 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
       STONE_MARGIN_SCALE,
    } = constants;
 
+   if (!frameProvider?.capabilities?.has?.('canvas')) {
+      throw new Error('The active renderer cannot provide canvas frames for video export.');
+   }
+
    const reportProgress = (progress, statusText = '') => {
       onProgress?.(progress, statusText);
    };
@@ -479,9 +475,9 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
 
    const desiredExportFps = TILT_PRERENDER_SAMPLE_FPS;
    const exportQuality = getExportQualityPreset(uiState.exportQualityPx);
-   const maxTexDim = device?.limits?.maxTextureDimension2D ?? exportQuality.maxLongEdge;
+   const maxTexDim = frameProvider.maxTextureDimension2D ?? exportQuality.maxLongEdge;
    const targetLongEdge = Math.min(exportQuality.maxLongEdge, maxTexDim);
-   const exportSize = fitEvenSize(canvas.width, canvas.height, targetLongEdge);
+   const exportSize = fitEvenSize(frameProvider.viewportSize.width, frameProvider.viewportSize.height, targetLongEdge);
    const targetBitrate = exportQuality.bitrate;
    reportProgress(RENDER_PROGRESS_START, `Rendering ${exportSize.width}×${exportSize.height} frames…`);
    const encoderSelection = await pickVideoEncoderConfig(
@@ -500,22 +496,8 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
       `Rendering ${exportSize.width}×${exportSize.height} @ ${exportFps}fps · ${(encoderSelection.bitrate / 1_000_000).toFixed(1)} Mbps`,
    );
 
-   const exportCanvas = document.createElement('canvas');
-   exportCanvas.width = exportSize.width;
-   exportCanvas.height = exportSize.height;
-   const exportContext = exportCanvas.getContext('webgpu');
-   if (!exportContext) return false;
-   exportContext.configure({
-      device,
-      format: canvasFormat,
-      alphaMode: 'opaque',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-   });
-   const exportDepthTexture = device.createTexture({
-      size: [exportCanvas.width, exportCanvas.height],
-      format: 'depth24plus',
-      usage: GPUTextureUsage.RENDER_ATTACHMENT,
-   });
+   const exportTarget = frameProvider.createTarget(exportSize);
+   const exportCanvas = exportTarget.canvas;
 
    const sampleData = [];
    const syncSampleNumbers = [];
@@ -592,8 +574,6 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
       const baseRotX = quantizeOrientationAngle(currentRotX);
       const baseRotY = quantizeOrientationAngle(currentRotY);
       const ampRad = uiState.tiltAngleDeg * Math.PI / 180.0;
-      const { bindGroup, vertexBuffer, triCount } = renderBundle;
-
       for (let frameIndex = 0; frameIndex < renderedFrames; frameIndex++) {
          if (encodeErrorState.error) throw encodeErrorState.error;
 
@@ -632,32 +612,12 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
             uiState.lightMode === 4 ? 1.0 : 0.0,
             frameCameraPos,
          );
-         device.queue.writeBuffer(uniformBuffer, 0, exportUniformScratch);
-
-         const commandEncoder = device.createCommandEncoder();
-         const frameTexture = exportContext.getCurrentTexture();
          const bgColor = uiState.backgroundColor || [0.05, 0.05, 0.05];
-         const renderPass = commandEncoder.beginRenderPass({
-            colorAttachments: [{
-               view: frameTexture.createView(),
-               clearValue: { r: bgColor[0], g: bgColor[1], b: bgColor[2], a: 1.0 },
-               loadOp: 'clear',
-               storeOp: 'store',
-            }],
-            depthStencilAttachment: {
-               view: exportDepthTexture.createView(),
-               depthClearValue: 1.0,
-               depthLoadOp: 'clear',
-               depthStoreOp: 'discard',
-            },
+         await exportTarget.renderFrame({
+            renderBundle,
+            uniformData: exportUniformScratch,
+            backgroundColor: bgColor,
          });
-         renderPass.setPipeline(pipeline);
-         renderPass.setBindGroup(0, bindGroup);
-         renderPass.setVertexBuffer(0, vertexBuffer);
-         renderPass.draw(triCount * 3);
-         renderPass.end();
-         device.queue.submit([commandEncoder.finish()]);
-         await device.queue.onSubmittedWorkDone();
 
          const vf = new VideoFrame(exportCanvas, {
             timestamp: frameIndex * frameDurationUs,
@@ -726,7 +686,7 @@ async function exportTiltLoop(onProgress, uiState, runtime) {
       return true;
    } finally {
       try { encoder.close(); } catch { }
-      exportDepthTexture.destroy();
+      exportTarget.dispose();
       setAnimationState(prevAnimState);
       exportInProgress = false;
       requestRender();
