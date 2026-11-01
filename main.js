@@ -29,9 +29,19 @@ import {
 } from './geometry.js';
 import { exportInProgress, setupExporter } from './video.js';
 import { renderOrtho } from './ortho.js';
+import { createFrameProvider, createRendererBackend, FRAME_CAPABILITIES } from './renderer/contracts.js';
+import {
+   createSoftwareRaytracer,
+   sampleSoftwareGraphSweep,
+   sampleSoftwareGraphSweepAsync,
+} from './renderer/software-graph-sampler.js';
+import { packWebGPUUniforms } from './renderer/webgpu-uniforms.js';
+import { loadWebGPUShaderSources } from './renderer/webgpu-shaders.js';
+import { setupWebGLRendererApp } from './renderer/webgl-backend.js';
+import { createDesignOverlayController } from './renderer/design-overlay-controller.js';
+import { createFacetDesignController } from './renderer/facet-design-controller.js';
 
-const shaderSource = await (await fetch('shaders.wgsl')).text();
-const computeShaderSource = await (await fetch('compute.wgsl')).text();
+const { renderShaderSource: shaderSource, graphComputeShaderSource: computeShaderSource } = await loadWebGPUShaderSources();
 // Toggle debug overlays/features
 var DEBUG = true;
 
@@ -482,6 +492,644 @@ function requestRender() {
    if (framePending) return;
    framePending = true;
    requestAnimationFrame(frame);
+}
+
+function createRendererStatusLabel(text) {
+   const label = document.createElement('div');
+   label.textContent = text;
+   label.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:100;color:#ddd;background:rgba(0,0,0,.7);padding:6px 9px;border-radius:6px;font:12px system-ui;';
+   document.body.appendChild(label);
+}
+
+function getFallbackViewportLayout() {
+   const viewportWidth = window.innerWidth;
+   const viewportHeight = window.innerHeight;
+   if (viewportWidth <= 960) {
+      return { width: viewportWidth, height: viewportHeight, left: 0, top: 0 };
+   }
+   const controlsLeft = panel?.getBoundingClientRect?.().left;
+   const usableWidth = Number.isFinite(controlsLeft)
+      ? Math.max(2, Math.floor(controlsLeft - 8))
+      : viewportWidth;
+   const side = Math.max(2, Math.floor(Math.min(usableWidth, viewportHeight)));
+   return {
+      width: side,
+      height: side,
+      left: Math.round((usableWidth - side) * 0.5),
+      top: Math.round((viewportHeight - side) * 0.5),
+   };
+}
+
+function applyFallbackViewportLayout(canvas, renderScale = 1) {
+   const layout = getFallbackViewportLayout();
+   canvas.style.position = 'fixed';
+   canvas.style.width = `${layout.width}px`;
+   canvas.style.height = `${layout.height}px`;
+   canvas.style.left = `${layout.left}px`;
+   canvas.style.top = `${layout.top}px`;
+   return {
+      ...layout,
+      pixelWidth: Math.max(2, Math.floor(layout.width * renderScale)),
+      pixelHeight: Math.max(2, Math.floor(layout.height * renderScale)),
+   };
+}
+
+async function loadStoneFromUrl(filename, url) {
+   const ext = filename.toLowerCase().match(/\.\w+$/)?.[0] ?? '';
+   const response = await fetch(url);
+   const data = await response.arrayBuffer();
+   let stone;
+   switch (ext) {
+      case '.gem': stone = await loadGEM(data); break;
+      case '.gcs': stone = await loadGCS(data); break;
+      case '.asc': stone = await loadASC(data); break;
+      default: stone = await loadSTL(data); break;
+   }
+   normalizeStoneToUnitSphere(stone);
+   return stone;
+}
+
+function installFallbackPointerControls(canvas, app) {
+   let dragging = false;
+   let dragPointerId = null;
+   let lastX = 0;
+   let lastY = 0;
+   const sensitivity = 0.01;
+
+   const endDrag = (event) => {
+      if (!dragging) return;
+      if (event && dragPointerId !== null && event.pointerId !== dragPointerId) return;
+      dragging = false;
+      dragPointerId = null;
+   };
+
+   canvas.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0) return;
+      dragging = true;
+      dragPointerId = event.pointerId;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      canvas.setPointerCapture(event.pointerId);
+   });
+   canvas.addEventListener('pointerup', endDrag);
+   canvas.addEventListener('pointercancel', endDrag);
+   canvas.addEventListener('pointerleave', endDrag);
+   canvas.addEventListener('pointermove', (event) => {
+      if (!dragging || event.pointerId !== dragPointerId) return;
+      const dx = event.clientX - lastX;
+      const dy = event.clientY - lastY;
+      lastX = event.clientX;
+      lastY = event.clientY;
+      const current = app.getRotation?.() || { x: 0, y: 0 };
+      app.setRotation?.(current.x + dy * sensitivity, current.y + dx * sensitivity);
+   });
+}
+
+let fallbackDesignOverlay = null;
+let fallbackDesignController = null;
+function setupFallbackDesignOverlay(canvas, app, options = {}) {
+   fallbackDesignController?.dispose();
+   fallbackDesignOverlay?.dispose();
+   fallbackDesignOverlay = createDesignOverlayController({
+      canvas,
+      getStone: () => app.getStone?.(),
+      getCameraState: () => app.getCameraState?.(),
+      isDesignMode: () => document.getElementById('gemDesignTabPanel')?.classList.contains('active') ?? false,
+      useOcclusionCulling: options.useOcclusionCulling,
+      useFaceCulling: options.useFaceCulling,
+      useProjectedFaceCulling: options.useProjectedFaceCulling,
+      drawBaseEdges: options.drawBaseEdges,
+      onSelectionChanged(selection) {
+         fallbackDesignController?.onSelectionChanged(selection);
+      },
+   });
+   fallbackDesignController = createFacetDesignController({
+      app,
+      ui,
+      overlay: fallbackDesignOverlay,
+      onDesignChanged(definition) {
+         designFacets = definition.facets.map((facet, index) => normalizeDesignFacet(facet, index));
+      },
+   });
+   if (app.getStone?.()) fallbackDesignController.onStoneLoaded(app.getStone());
+   return fallbackDesignOverlay;
+}
+
+function setupFallbackUiBindings(app) {
+   if (uiControls) return uiControls;
+   uiControls = buildUI(ui, {
+      onRenderOutputChanged() {
+         app.setUiState?.(ui);
+         app.requestRender?.();
+      },
+      onGraphParamsChanged() {
+         app.setUiState?.(ui);
+         app.requestRender?.();
+         app.requestGraphUpdate?.();
+      },
+      onRenderScaleChanged() {
+         app.setUiState?.(ui);
+         app.requestRender?.();
+      },
+      onGemTopTabChanged() { },
+      onCutsNavigate() { },
+      onReset() { app.resetView?.(); },
+      onTilt() { return app.toggleTilt?.() ?? false; },
+      onFileSelected(name, fileUrl) { app.loadModel(name, fileUrl); },
+      async captureRenderedFrameForPrint() {
+         return app.captureStill?.() || '';
+      },
+   });
+   return uiControls;
+}
+
+function setupFallbackGraph(app) {
+   let requestId = 0;
+   let timer = null;
+   const update = () => {
+      const stone = app.getStone?.();
+      if (!stone?.vertexData || !graphSvgEl) return;
+      const currentRequest = ++requestId;
+      graphStatusEl.textContent = 'Updating graph…';
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+         if (currentRequest !== requestId) return;
+         const series = await sampleSoftwareGraphSweepAsync({
+            vertexData: stone.vertexData,
+            tiltValues: GRAPH_TILT_VALUES,
+            modes: GRAPH_MODES,
+            hasTableFacet: hasUniqueTableFacet(stone.facets),
+            material: ui,
+         }, () => currentRequest === requestId);
+         if (!series || currentRequest !== requestId) return;
+         const width = Math.max(220, Math.round(graphSvgEl.clientWidth || 388));
+         const height = Math.max(140, Math.round(graphSvgEl.clientHeight || 220));
+         graphSvgEl.setAttribute('viewBox', `0 0 ${width} ${height}`);
+         graphSvgEl.innerHTML = buildGraphSvgInner(series, width, height, GRAPH_THEME_DARK);
+         graphStatusEl.textContent = 'Software optical trace';
+      }, 150);
+   };
+   app.requestGraphUpdate = update;
+   return update;
+}
+
+function setupFallbackPerformanceMetrics(app) {
+   const overlay = document.getElementById('fpsOverlay');
+   const toggle = document.getElementById('perfStatsToggle');
+   if (!overlay || !toggle) return;
+   let frameCount = 0;
+   let lastSample = performance.now();
+   let visible = false;
+   const render = () => {
+      if (!visible) return;
+      frameCount++;
+      const now = performance.now();
+      if (now - lastSample < 500) return;
+      overlay.textContent = `${app.renderer.toUpperCase()} presentation ${((frameCount * 1000) / (now - lastSample)).toFixed(1)} fps`;
+      frameCount = 0;
+      lastSample = now;
+   };
+   const samplePresentation = () => {
+      render();
+      if (visible) requestAnimationFrame(samplePresentation);
+   };
+   toggle.addEventListener('change', () => {
+      visible = toggle.checked;
+      overlay.style.display = visible ? 'block' : 'none';
+      if (!visible) overlay.textContent = '';
+      lastSample = performance.now();
+      frameCount = 0;
+      if (visible) requestAnimationFrame(samplePresentation);
+   });
+   app.recordFrame = render;
+}
+
+function populateFallbackModelUi(filename, stone) {
+   if (stone.refractiveIndex && stone.refractiveIndex > 1) uiControls?.setRI(stone.refractiveIndex);
+   if (stone.dispersion != null) uiControls?.setCOD(stone.dispersion);
+   uiControls?.setFileName(filename);
+
+   if (facetListEl) facetListEl.innerHTML = buildFacetInfo(stone);
+   if (facetStatusEl) {
+      facetStatusEl.textContent = Array.isArray(stone.facets) && stone.facets.length
+         ? `${stone.facets.length} facets parsed from ${filename}`
+         : `No facet notes found in ${filename}`;
+   }
+   if (Number.isFinite(stone.sourceGear) && stone.sourceGear > 0) {
+      designGearEl.value = String(stone.sourceGear);
+   }
+   setMetadataToDesign(stone.metadata || {});
+}
+
+let fallbackFacetTabsBound = false;
+function setupFallbackFacetTabs() {
+   if (fallbackFacetTabsBound) return;
+   fallbackFacetTabsBound = true;
+   const setTab = (tabName) => {
+      const isEdit = tabName === 'edit';
+      facetEditPanelEl?.classList.toggle('active', isEdit);
+      facetInstructionsPanelEl?.classList.toggle('active', !isEdit);
+      facetSplitTabsEl?.querySelectorAll('.tabBtn[data-facet-tab]').forEach((button) => {
+         button.classList.toggle('active', button.dataset.facetTab === (isEdit ? 'edit' : 'instructions'));
+      });
+   };
+   facetSplitTabsEl?.addEventListener('click', (event) => {
+      const button = event.target.closest('.tabBtn[data-facet-tab]');
+      if (button) setTab(button.dataset.facetTab);
+   });
+   setTab('instructions');
+}
+
+let fallbackPanelsBound = false;
+function toggleFloatingPanel(panelEl, toggleEl, expandedSizeRef, name, onExpand) {
+   const willCollapse = !panelEl.classList.contains('collapsed');
+   if (window.innerWidth > 960) {
+      const isLeftAnchored = panelEl.dataset.anchorSide === 'left';
+      if (willCollapse) {
+         const rect = panelEl.getBoundingClientRect();
+         expandedSizeRef.width = Math.max(260, Math.round(rect.width));
+         expandedSizeRef.height = Math.max(120, Math.round(rect.height));
+         const rightPx = Math.max(0, Math.round(window.innerWidth - rect.right));
+         const leftPx = Math.max(0, Math.round(rect.left));
+         panelEl.style.position = 'fixed';
+         panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
+         panelEl.style.top = `${Math.max(0, Math.round(rect.top))}px`;
+         panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
+         panelEl.style.bottom = 'auto';
+         panelEl.style.width = '200px';
+         panelEl.style.height = 'auto';
+      } else {
+         const desiredWidth = Math.max(260, Math.round(expandedSizeRef.width || 260));
+         const desiredHeight = Math.max(120, Math.round(expandedSizeRef.height || 120));
+         const rect = panelEl.getBoundingClientRect();
+         const rightPx = Math.max(0, Math.min(
+            Math.max(0, window.innerWidth - desiredWidth),
+            Math.round(window.innerWidth - rect.right),
+         ));
+         const leftPx = Math.max(0, Math.min(
+            Math.max(0, window.innerWidth - desiredWidth),
+            Math.round(rect.left),
+         ));
+         panelEl.style.position = 'fixed';
+         panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
+         panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
+         panelEl.style.width = `${desiredWidth}px`;
+         panelEl.style.height = `${desiredHeight}px`;
+         panelEl.style.zIndex = '120';
+      }
+   } else {
+      panelEl.style.width = '';
+      panelEl.style.height = '';
+   }
+   panelEl.classList.toggle('collapsed', willCollapse);
+   toggleEl.textContent = willCollapse ? '+' : '−';
+   toggleEl.setAttribute('aria-label', willCollapse ? `Expand ${name}` : `Minimize ${name}`);
+   if (!willCollapse) onExpand?.();
+}
+
+function setupFallbackPanelBindings() {
+   if (fallbackPanelsBound) return;
+   fallbackPanelsBound = true;
+   const bindings = [
+      [lightReturnPanel, graphToggleEl, { width: 420, height: 320 }, 'graph'],
+      [facetPanel, facetToggleEl, { width: 420, height: 260 }, 'facet notes'],
+      [gemLibraryPanel, gemLibraryToggleEl, { width: 420, height: 320 }, 'gem library'],
+   ];
+   for (const [panelEl, toggleEl, expandedSize, name] of bindings) {
+      if (!panelEl || !toggleEl) continue;
+      toggleEl.addEventListener('click', () => {
+         toggleFloatingPanel(panelEl, toggleEl, expandedSize, name);
+      });
+   }
+}
+
+let fallbackPanelLayoutBound = false;
+function setupFallbackPanelLayoutControls() {
+   if (fallbackPanelLayoutBound) return;
+   fallbackPanelLayoutBound = true;
+   const panels = [
+      { panel: graphPanel, header: graphHeaderEl, handles: [graphResizeEl, graphResizeRightEl], minWidth: 260 },
+      { panel: facetPanel, header: facetHeaderEl, handles: [facetResizeEl, facetResizeRightEl], minWidth: 260 },
+      { panel: gemLibraryPanel, header: gemLibraryHeaderEl, handles: [gemLibraryResizeEl, gemLibraryResizeRightEl], minWidth: 480 },
+   ];
+
+   for (const { panel: panelEl, header, handles, minWidth } of panels) {
+      if (!panelEl || !header) continue;
+      let drag = null;
+      header.addEventListener('pointerdown', (event) => {
+         if (event.target.closest('button, input, select, textarea, .designBtn')) return;
+         if (window.innerWidth <= 960) return;
+         const rect = panelEl.getBoundingClientRect();
+         drag = { pointerId: event.pointerId, offsetX: event.clientX - rect.left, offsetY: event.clientY - rect.top };
+         panelEl.style.position = 'fixed';
+         panelEl.style.right = 'auto';
+         panelEl.style.bottom = 'auto';
+         header.setPointerCapture(event.pointerId);
+      });
+      header.addEventListener('pointermove', (event) => {
+         if (!drag || event.pointerId !== drag.pointerId) return;
+         const left = Math.max(0, Math.min(window.innerWidth - 80, event.clientX - drag.offsetX));
+         const top = Math.max(0, Math.min(window.innerHeight - 40, event.clientY - drag.offsetY));
+         panelEl.style.left = `${Math.round(left)}px`;
+         panelEl.style.top = `${Math.round(top)}px`;
+      });
+      const endDrag = (event) => {
+         if (!drag || (event && event.pointerId !== drag.pointerId)) return;
+         drag = null;
+      };
+      header.addEventListener('pointerup', endDrag);
+      header.addEventListener('pointercancel', endDrag);
+
+      for (const handle of handles.filter(Boolean)) {
+         let resize = null;
+         handle.addEventListener('pointerdown', (event) => {
+            if (panelEl.classList.contains('collapsed') || window.innerWidth <= 960) return;
+            event.preventDefault();
+            const rect = panelEl.getBoundingClientRect();
+            resize = {
+               pointerId: event.pointerId,
+               left: rect.left,
+               top: rect.top,
+               right: rect.right,
+               fromRight: handle === handles[1],
+            };
+            handle.setPointerCapture(event.pointerId);
+         });
+         handle.addEventListener('pointermove', (event) => {
+            if (!resize || event.pointerId !== resize.pointerId) return;
+            const width = Math.max(minWidth, Math.round(resize.fromRight
+               ? event.clientX - resize.left
+               : resize.right - event.clientX));
+            const height = Math.max(120, Math.round(event.clientY - resize.top));
+            panelEl.style.position = 'fixed';
+            panelEl.style.right = 'auto';
+            if (!resize.fromRight) panelEl.style.left = `${Math.max(0, resize.right - width)}px`;
+            panelEl.style.width = `${width}px`;
+            panelEl.style.height = `${height}px`;
+         });
+         const endResize = (event) => {
+            if (!resize || (event && event.pointerId !== resize.pointerId)) return;
+            resize = null;
+         };
+         handle.addEventListener('pointerup', endResize);
+         handle.addEventListener('pointercancel', endResize);
+      }
+   }
+   requestAnimationFrame(() => {
+      if (window.innerWidth <= 960) return;
+      const layouts = panels
+         .map(({ panel: panelEl }) => ({ panelEl, rect: panelEl?.getBoundingClientRect() }))
+         .filter(({ panelEl, rect }) => panelEl && rect);
+      for (const { panelEl, rect } of layouts) {
+         panelEl.style.position = 'fixed';
+         panelEl.style.left = `${Math.max(0, Math.round(rect.left))}px`;
+         panelEl.style.top = `${Math.max(0, Math.round(rect.top))}px`;
+         panelEl.style.right = 'auto';
+         panelEl.style.bottom = 'auto';
+         panelEl.style.width = `${Math.round(rect.width)}px`;
+         panelEl.style.height = `${Math.round(rect.height)}px`;
+         panelEl.style.zIndex = '120';
+      }
+      if (gemLibraryPanel) {
+         gemLibraryPanel.dataset.anchorSide = 'left';
+         gemLibraryPanel.style.left = '18px';
+         gemLibraryPanel.style.top = '18px';
+         gemLibraryPanel.style.right = 'auto';
+         gemLibraryPanel.style.width = `${Math.max(480, Math.round(gemLibraryPanel.getBoundingClientRect().width))}px`;
+         gemLibraryPanel.style.height = `${Math.max(120, Math.round(window.innerHeight - 36))}px`;
+      }
+   });
+}
+
+let fallbackDesignNoticeBound = false;
+function setupFallbackDesignNotice() {
+   if (fallbackDesignNoticeBound) return;
+   fallbackDesignNoticeBound = true;
+   const unsupportedMessage = 'Scale editing requires the WebGPU renderer right now.';
+   const notify = () => {
+      if (designStatusEl) designStatusEl.textContent = unsupportedMessage;
+   };
+   designApplyScaleBtn?.addEventListener('click', notify);
+   designResetScaleBtn?.addEventListener('click', notify);
+}
+
+function stoneToOrthoFaces(stone) {
+   const faces = [];
+   const vertexData = stone?.vertexData;
+   if (!(vertexData instanceof Float32Array)) return faces;
+   for (let offset = 0; offset + 20 < vertexData.length; offset += 21) {
+      const normal = [vertexData[offset + 3], vertexData[offset + 4], vertexData[offset + 5]];
+      faces.push({
+         name: '',
+         normal,
+         angleDeg: Math.acos(Math.min(1, Math.abs(normal[2] || 0))) * 180 / Math.PI,
+         signedAngleDeg: computeSignedFacetAngleDeg(normal),
+         vertices: [
+            [vertexData[offset], vertexData[offset + 1], vertexData[offset + 2]],
+            [vertexData[offset + 7], vertexData[offset + 8], vertexData[offset + 9]],
+            [vertexData[offset + 14], vertexData[offset + 15], vertexData[offset + 16]],
+         ],
+      });
+   }
+   return faces;
+}
+
+async function setupOrthoPreviewApp() {
+   const canvas = document.getElementById('gpuCanvas');
+   createRendererStatusLabel('Renderer: software ray tracing');
+
+   let stone = null;
+   let raytracer = null;
+   let currentRotX = 0;
+   let currentRotY = 0;
+   let framePending = false;
+   let rerenderRequested = false;
+   let tiltAnimating = false;
+   let tiltBaseX = 0;
+   let tiltBaseY = 0;
+   let tiltStartTs = 0;
+
+   const draw = async () => {
+      if (!stone) return;
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const scale = ui.renderScale > 0 ? ui.renderScale : dpr;
+      const layout = applyFallbackViewportLayout(canvas, Math.max(0.5, Math.min(dpr, scale)));
+      canvas.width = layout.pixelWidth;
+      canvas.height = layout.pixelHeight;
+      await raytracer?.render({ canvas, material: ui, rotation: { x: currentRotX, y: currentRotY } });
+   };
+
+   function requestRender() {
+      rerenderRequested = true;
+      if (framePending) return;
+      framePending = true;
+      requestAnimationFrame(async () => {
+         while (rerenderRequested) {
+            rerenderRequested = false;
+            await draw();
+            app.recordFrame?.();
+            fallbackDesignOverlay?.draw();
+         }
+         framePending = false;
+      });
+   }
+
+   function stopTilt() {
+      tiltAnimating = false;
+   }
+
+   function tickTilt(timestamp) {
+      if (!tiltAnimating) return;
+      if (!tiltStartTs) tiltStartTs = timestamp;
+      const elapsedSec = (timestamp - tiltStartTs) / 1000;
+      const amp = (ui.tiltAngleDeg || 10) * Math.PI / 180;
+      currentRotX = tiltBaseX + Math.sin(elapsedSec * Math.PI) * amp;
+      currentRotY = tiltBaseY + Math.cos(elapsedSec * Math.PI) * amp;
+      requestRender();
+      requestAnimationFrame(tickTilt);
+   }
+
+   function getCameraState() {
+      const model = mat4.create();
+      const view = mat4.create();
+      const projection = mat4.create();
+      const cameraDistance = Math.max(0.1, (ui.focalLength || 200) / 10);
+      // The CPU tracer transforms points with rotateX followed by rotateY.
+      mat4.rotateY(model, model, currentRotY);
+      mat4.rotateX(model, model, currentRotX);
+      mat4.lookAt(view, [0, 0, cameraDistance], [0, 0, 0], [0, 1, 0]);
+      const sensorHalf = 5 * Math.tan(Math.PI / 8) * 0.70;
+      const aspect = Math.max(0.01, canvas.clientWidth / Math.max(1, canvas.clientHeight));
+      mat4.perspective(projection, 2 * Math.atan(sensorHalf / cameraDistance), aspect, 0.1, 200);
+      return {
+         modelMatrix: model,
+         viewMatrix: view,
+         projectionMatrix: projection,
+         cameraPosition: [0, 0, cameraDistance],
+      };
+   }
+
+   const app = {
+      async loadModel(filename, url) {
+         stone = await loadStoneFromUrl(filename, url);
+         raytracer = createSoftwareRaytracer(stone);
+         populateFallbackModelUi(filename, stone);
+         fallbackDesignOverlay?.setModel(stone);
+         fallbackDesignController?.onStoneLoaded(stone, filename);
+         requestRender();
+         app.requestGraphUpdate?.();
+      },
+      setStone(filename, nextStone) {
+         stone = nextStone;
+         raytracer = createSoftwareRaytracer(stone);
+         populateFallbackModelUi(filename, stone);
+         fallbackDesignOverlay?.setModel(stone);
+         requestRender();
+         app.requestGraphUpdate?.();
+      },
+      requestRender,
+      setRotation(rotX, rotY) {
+         stopTilt();
+         currentRotX = rotX;
+         currentRotY = rotY;
+         requestRender();
+      },
+      getRotation() {
+         return { x: currentRotX, y: currentRotY };
+      },
+      getCameraState,
+      resetView() {
+         stopTilt();
+         currentRotX = 0;
+         currentRotY = 0;
+         requestRender();
+      },
+      toggleTilt() {
+         if (tiltAnimating) {
+            stopTilt();
+            return false;
+         }
+         tiltAnimating = true;
+         tiltBaseX = currentRotX;
+         tiltBaseY = currentRotY;
+         tiltStartTs = 0;
+         requestAnimationFrame(tickTilt);
+         return true;
+      },
+      captureStill() {
+         return canvas.toDataURL('image/png');
+      },
+      setUiState() {
+         requestRender();
+      },
+      getStone() {
+         return stone;
+      },
+      renderer: 'software',
+   };
+
+   setupFallbackUiBindings(app);
+   setupFallbackFacetTabs();
+   setupFallbackPanelBindings();
+   setupFallbackPanelLayoutControls();
+   setupFallbackGraph(app);
+   setupFallbackPerformanceMetrics(app);
+   installFallbackPointerControls(canvas, app);
+   setupFallbackDesignOverlay(canvas, app);
+   window.addEventListener('resize', requestRender);
+   return app;
+}
+
+async function setupWebGLPreviewApp() {
+   const app = await setupWebGLRendererApp({
+      canvas: document.getElementById('gpuCanvas'),
+      mat4,
+      loadStoneFromUrl,
+      computeMeshBoundsRadius,
+      createStatusLabel: createRendererStatusLabel,
+      getViewportLayout: (scale) => applyFallbackViewportLayout(
+         document.getElementById('gpuCanvas'),
+         scale,
+      ),
+   });
+   if (!app) return null;
+   const originalLoadModel = app.loadModel.bind(app);
+   app.loadModel = async (filename, url) => {
+      const stone = await originalLoadModel(filename, url);
+      populateFallbackModelUi(filename, stone);
+      fallbackDesignOverlay?.setModel(stone);
+      fallbackDesignController?.onStoneLoaded(stone, filename);
+      app.requestGraphUpdate?.();
+   };
+   const originalSetStone = app.setStone.bind(app);
+   app.setStone = (filename, stone) => {
+      originalSetStone(filename, stone);
+      populateFallbackModelUi(filename, stone);
+      fallbackDesignOverlay?.setModel(stone);
+      app.requestGraphUpdate?.();
+   };
+   const originalSetRotation = app.setRotation.bind(app);
+   app.setRotation = (rotX, rotY) => {
+      originalSetRotation(rotX, rotY);
+      app.recordFrame?.();
+      fallbackDesignOverlay?.draw();
+   };
+   const originalRequestRender = app.requestRender.bind(app);
+   app.requestRender = () => {
+      originalRequestRender();
+      app.recordFrame?.();
+      fallbackDesignOverlay?.draw();
+   };
+   app.setUiState?.(ui);
+   setupFallbackUiBindings(app);
+   setupFallbackFacetTabs();
+   setupFallbackPanelBindings();
+   setupFallbackPanelLayoutControls();
+   setupFallbackGraph(app);
+   setupFallbackPerformanceMetrics(app);
+   installFallbackPointerControls(document.getElementById('gpuCanvas'), app);
+   setupFallbackDesignOverlay(document.getElementById('gpuCanvas'), app);
+   return app;
 }
 
 function clampRenderScale(scale, maxScale) {
@@ -1024,9 +1672,9 @@ function buildUI(ui, cbs) {
 
       let stoneRenderImg = '';
       try {
-         const raytraceDataUrl = await cbs.captureRaytracedStoneForPrint?.();
-         if (raytraceDataUrl) {
-            stoneRenderImg = `<img id="stoneRender" src="${raytraceDataUrl}" class="stoneRender">`;
+         const renderedFrameDataUrl = await cbs.captureRenderedFrameForPrint?.();
+         if (renderedFrameDataUrl) {
+            stoneRenderImg = `<img id="stoneRender" src="${renderedFrameDataUrl}" class="stoneRender">`;
          }
       } catch (err) {
          console.error('printPreview: failed to capture raytraced stone image', err);
@@ -1172,9 +1820,9 @@ ${stoneRenderImg}
 }
 
 // ---------------------------------------------------------------------------
-// setupApp — one-time WebGPU + UI init; returns { loadModel }
+// setupWebGPUApp — one-time WebGPU + UI init; returns { loadModel }
 // ---------------------------------------------------------------------------
-async function setupApp() {
+async function setupWebGPUApp() {
    const canvas = document.getElementById('gpuCanvas');
    const isMobileDevice =
       navigator.userAgentData?.mobile
@@ -1195,10 +1843,7 @@ async function setupApp() {
       device = await adapter?.requestDevice();
    }
 
-   if (!device) {
-      alert('WebGPU is not supported. Try a different browser.');
-      return null;
-   }
+   if (!device) return null;
 
    const context = canvas.getContext('webgpu');
    const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
@@ -1306,6 +1951,82 @@ async function setupApp() {
          module: computeReduceShaderModule,
          entryPoint: 'cs_reduce_graph',
       },
+   });
+
+   const frameProvider = createFrameProvider({
+      capabilities: new Set([FRAME_CAPABILITIES.CANVAS]),
+      maxTextureDimension2D: device.limits.maxTextureDimension2D,
+      viewportSize: () => ({ width: canvas.width, height: canvas.height }),
+      createTarget({ width, height }) {
+         const targetCanvas = document.createElement('canvas');
+         targetCanvas.width = width;
+         targetCanvas.height = height;
+         const targetContext = targetCanvas.getContext('webgpu');
+         if (!targetContext) {
+            throw new Error('Unable to create a WebGPU frame target.');
+         }
+         targetContext.configure({
+            device,
+            format: canvasFormat,
+            alphaMode: 'opaque',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+         });
+         const targetDepthTexture = device.createTexture({
+            size: [width, height],
+            format: 'depth24plus',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT,
+         });
+
+         return Object.freeze({
+            canvas: targetCanvas,
+            async renderFrame({ renderBundle: bundle, uniformData, backgroundColor }) {
+               if (!bundle) throw new Error('No model loaded for frame rendering.');
+               device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+               const commandEncoder = device.createCommandEncoder();
+               const renderPass = commandEncoder.beginRenderPass({
+                  colorAttachments: [{
+                     view: targetContext.getCurrentTexture().createView(),
+                     clearValue: {
+                        r: backgroundColor[0],
+                        g: backgroundColor[1],
+                        b: backgroundColor[2],
+                        a: 1.0,
+                     },
+                     loadOp: 'clear',
+                     storeOp: 'store',
+                  }],
+                  depthStencilAttachment: {
+                     view: targetDepthTexture.createView(),
+                     depthClearValue: 1.0,
+                     depthLoadOp: 'clear',
+                     depthStoreOp: 'discard',
+                  },
+               });
+               renderPass.setPipeline(pipeline);
+               renderPass.setBindGroup(0, bundle.bindGroup);
+               renderPass.setVertexBuffer(0, bundle.vertexBuffer);
+               renderPass.draw(bundle.triCount * 3);
+               renderPass.end();
+               device.queue.submit([commandEncoder.finish()]);
+               await device.queue.onSubmittedWorkDone();
+            },
+            dispose() {
+               targetDepthTexture.destroy();
+            },
+         });
+      },
+   });
+   const rendererBackend = createRendererBackend({
+      id: 'webgpu',
+      capabilities: {
+         frameProvider,
+         graphAcceleration: true,
+         stillCapture: true,
+      },
+      loadMesh: (filename, stone, options) => applyStoneData(filename, stone, options),
+      renderFrame: ({ target, ...frame }) => target.renderFrame(frame),
+      sampleGraph: (runId) => sampleGraphSweep(runId),
+      captureStill: () => canvas.toDataURL('image/png'),
    });
 
    // --- Depth texture (recreated on resize) ---
@@ -2163,7 +2884,7 @@ async function setupApp() {
          if (Date.now() < designFacetReorderSuppressClickUntil) return;
          const rowEl = e.target.closest('tr[data-id]');
          if (!rowEl || !rootEl.contains(rowEl)) return;
-         if (e.target.closest('[data-remove]')) return;
+         if (e.target.closest('input, select, textarea, button, label, [data-remove]')) return;
 
          dragState = {
             pointerId: e.pointerId,
@@ -2239,57 +2960,7 @@ async function setupApp() {
 
    // Toggles a panel's collapsed state. DOM class is the sole source of truth.
    function togglePanel(panelEl, toggleEl, expandedSizeRef, name, onExpand) {
-      const willCollapse = !panelEl.classList.contains('collapsed');
-      const isLeftAnchored = panelEl.dataset.anchorSide === 'left';
-      if (window.innerWidth > 960) {
-         if (willCollapse) {
-            const rect = panelEl.getBoundingClientRect();
-            expandedSizeRef.width = Math.max(260, Math.round(rect.width));
-            expandedSizeRef.height = Math.max(120, Math.round(rect.height));
-            const rightPx = Math.max(0, Math.round(window.innerWidth - rect.right));
-            const leftPx = Math.max(0, Math.round(rect.left));
-            const topPx = Math.max(0, Math.round(rect.top));
-            panelEl.dataset.anchorRightPx = String(rightPx);
-            panelEl.dataset.anchorLeftPx = String(leftPx);
-            panelEl.dataset.anchorTopPx = String(topPx);
-            panelEl.style.position = 'fixed';
-            panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
-            panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
-            panelEl.style.top = `${topPx}px`;
-            panelEl.style.bottom = 'auto';
-            panelEl.style.width = '200px';
-            panelEl.style.height = 'auto';
-         } else {
-            const desiredWidth = Math.max(260, Math.round(expandedSizeRef.width || 260));
-            const desiredHeight = Math.max(120, Math.round(expandedSizeRef.height || 120));
-            const rect = panelEl.getBoundingClientRect();
-            const rawRight = Math.round(window.innerWidth - rect.right);
-            const rawLeft = Math.round(rect.left);
-            const rawTop = Math.round(rect.top);
-            const maxRight = Math.max(0, window.innerWidth - desiredWidth);
-            const maxLeft = Math.max(0, window.innerWidth - desiredWidth);
-            const maxTop = Math.max(0, window.innerHeight - desiredHeight);
-            const rightPx = Math.max(0, Math.min(maxRight, rawRight));
-            const leftPx = Math.max(0, Math.min(maxLeft, rawLeft));
-            const topPx = Math.max(0, Math.min(maxTop, rawTop));
-
-            panelEl.style.position = 'fixed';
-            panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
-            panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
-            panelEl.style.top = `${topPx}px`;
-            panelEl.style.bottom = 'auto';
-            panelEl.style.width = `${desiredWidth}px`;
-            panelEl.style.height = `${desiredHeight}px`;
-            panelEl.style.zIndex = '120';
-         }
-      } else {
-         panelEl.style.width = '';
-         panelEl.style.height = '';
-      }
-      panelEl.classList.toggle('collapsed', willCollapse);
-      toggleEl.textContent = willCollapse ? '+' : '−';
-      toggleEl.setAttribute('aria-label', willCollapse ? `Expand ${name}` : `Minimize ${name}`);
-      if (!willCollapse) onExpand?.();
+      toggleFloatingPanel(panelEl, toggleEl, expandedSizeRef, name, onExpand);
    }
 
    function ensureDesktopFloatingPanel(panelEl) {
@@ -3028,6 +3699,9 @@ async function setupApp() {
    const invModelMat = mat4.create();
 
    let currentGemTab = 'controls';
+   // WebGPU keeps its render pipeline here, but design interaction is shared
+   // with the fallback renderers after the legacy bindings are detached.
+   let useSharedDesignControllers = false;
    let cutsSourceStone = null;
    let cutsSequence = [];
    let cutsAngleIndex = 0;
@@ -4649,72 +5323,29 @@ async function setupApp() {
    }
 
    function packUniformData(out, modelMatrix, projectionMatrix, time, lightMode, graphMode, flatShading) {
-      out.set(modelMatrix, 0);
-      out.set(viewMat, 16);
-      out.set(projectionMatrix, 32);
-
-      out[48] = cameraPos[0];
-      out[49] = cameraPos[1];
-      out[50] = cameraPos[2];
-      out[51] = ui.clarity;
-
-      out[52] = time;
-      out[53] = ui.ri;
-      out[54] = ui.cod;
-      out[55] = lightMode;
-
-      out[56] = ui.axisAColor[0];
-      out[57] = ui.axisAColor[1];
-      out[58] = ui.axisAColor[2];
-      out[59] = graphMode;
-
-      out[60] = ui.axisBColor[0];
-      out[61] = ui.axisBColor[1];
-      out[62] = ui.axisBColor[2];
-      out[63] = ui.exitStrength;
-
-      // 256: axisCColor vec3, 268: flatShading
-      out[64] = ui.axisCColor[0];
-      out[65] = ui.axisCColor[1];
-      out[66] = ui.axisCColor[2];
-      out[67] = flatShading;
-
-      // 272: exitHighlight vec3, 284: convexFacetMode
-      out[68] = ui.exitHighlight[0];
-      out[69] = ui.exitHighlight[1];
-      out[70] = ui.exitHighlight[2];
-      out[71] = ui.convexFacetMode;
-
-      // 288: headShadowColor vec3, 300: padding
-      out[72] = ui.headShadowColor[0];
-      out[73] = ui.headShadowColor[1];
-      out[74] = ui.headShadowColor[2];
-      out[75] = 0.0;
-
-      // Compose local-space orientation quaternion q = qz * qy * qx from slider angles.
-      let xRad = ui.axisTiltXDeg * Math.PI / 180.0;
-      let yRad = ui.axisTiltYDeg * Math.PI / 180.0;
-      let zRad = ui.axisTiltZDeg * Math.PI / 180.0;
-      let hx = 0.5 * xRad;
-      let hy = 0.5 * yRad;
-      let hz = 0.5 * zRad;
-      let sx = Math.sin(hx);
-      let cx = Math.cos(hx);
-      let sy = Math.sin(hy);
-      let cy = Math.cos(hy);
-      let sz = Math.sin(hz);
-      let cz = Math.cos(hz);
-      let qx = sx * cy * cz - cx * sy * sz;
-      let qy = cx * sy * cz + sx * cy * sz;
-      let qz = cx * cy * sz - sx * sy * cz;
-      let qw = cx * cy * cz + sx * sy * sz;
-      let qLenInv = 1.0 / Math.hypot(qx, qy, qz, qw);
-      // 304: axisQuat vec4
-      out[76] = qx * qLenInv;
-      out[77] = qy * qLenInv;
-      out[78] = qz * qLenInv;
-      out[79] = qw * qLenInv;
-
+      packWebGPUUniforms(out, {
+         modelMatrix,
+         viewMatrix: viewMat,
+         projectionMatrix,
+         cameraPosition: cameraPos,
+         material: {
+            clarity: ui.clarity,
+            ri: ui.ri,
+            cod: ui.cod,
+            axisAColor: ui.axisAColor,
+            axisBColor: ui.axisBColor,
+            axisCColor: ui.axisCColor,
+            exitStrength: ui.exitStrength,
+            exitHighlight: ui.exitHighlight,
+            convexFacetMode: ui.convexFacetMode,
+            headShadowColor: ui.headShadowColor,
+            axisTiltDeg: [ui.axisTiltXDeg, ui.axisTiltYDeg, ui.axisTiltZDeg],
+         },
+         time,
+         lightMode,
+         graphMode,
+         flatShading,
+      });
    }
 
    function writeUniformsToBuffer(buffer, modelMatrix, projectionMatrix, time, lightMode, graphMode = 0.0) {
@@ -4867,7 +5498,20 @@ async function setupApp() {
    async function recomputeGraph(runId) {
       if (!renderBundle) return;
 
-      const seriesList = await sampleGraphSweep(runId);
+      let seriesList = null;
+      try {
+         seriesList = await rendererBackend.sampleGraph(runId);
+      } catch (error) {
+         console.warn('WebGPU graph acceleration failed; using software graph sampler.', error);
+         if (runId !== graphRequestId) return;
+         seriesList = sampleSoftwareGraphSweep({
+            vertexData: currentStone?.vertexData,
+            tiltValues: GRAPH_TILT_VALUES,
+            modes: GRAPH_MODES,
+            hasTableFacet: modelHasTableFacet,
+            material: ui,
+         });
+      }
       if (!seriesList) return;
 
       if (runId !== graphRequestId) return;
@@ -5533,7 +6177,7 @@ async function setupApp() {
 
       normalizeStoneToUnitSphere(stone);
 
-      await applyStoneData(filename, stone, { syncDesignFromStone: true, isDesign: false });
+      await rendererBackend.loadMesh(filename, stone, { syncDesignFromStone: true, isDesign: false });
 
       // If a new model is loaded while Cuts is active, restore should target this model,
       // not the model that was active before entering Cuts.
@@ -5638,7 +6282,7 @@ async function setupApp() {
          queueCutsNavigation(kind, 0);
       },
       onFileSelected(name, fileUrl) { loadModel(name, fileUrl); },
-      async captureRaytracedStoneForPrint() {
+      async captureRenderedFrameForPrint() {
          if (!renderBundle) return '';
 
          const prevBackground = [...ui.backgroundColor];
@@ -5651,7 +6295,7 @@ async function setupApp() {
          requestRender();
 
          await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-         const raytraceDataUrl = canvas.toDataURL('image/png');
+         const raytraceDataUrl = rendererBackend.captureStill();
 
          ui.backgroundColor = prevBackground;
          if (bgColorInput) bgColorInput.value = rgbToHex(prevBackground);
@@ -5665,11 +6309,7 @@ async function setupApp() {
 
    setupExporter(ui, () => ({
       renderBundle,
-      device,
-      canvas,
-      canvasFormat,
-      pipeline,
-      uniformBuffer,
+      frameProvider,
       mat4,
       currentModelFilename,
       currentRotX,
@@ -5765,7 +6405,7 @@ async function setupApp() {
 
    function endDrag(e) {
       if (e.pointerId !== dragPointerId) return;
-      if (currentGemTab === 'design' && designClickStart && designClickStart.pointerId === e.pointerId && !designClickStart.moved) {
+      if (!useSharedDesignControllers && currentGemTab === 'design' && designClickStart && designClickStart.pointerId === e.pointerId && !designClickStart.moved) {
          updateDesignHoverFromPointer(e.clientX, e.clientY, true);
          if (designHover) {
             // Design mode always accumulates selection; no modifier key needed.
@@ -5783,7 +6423,7 @@ async function setupApp() {
    gpuCanvas.addEventListener('pointercancel', endDrag);
 
    gpuCanvas.addEventListener('pointermove', (e) => {
-      updateDesignHoverFromPointer(e.clientX, e.clientY);
+      if (!useSharedDesignControllers) updateDesignHoverFromPointer(e.clientX, e.clientY);
 
       if (e.pointerId !== dragPointerId) return;
       if (designClickStart && designClickStart.pointerId === e.pointerId) {
@@ -5817,6 +6457,7 @@ async function setupApp() {
       const hasUndoModifier = isMac ? e.metaKey : e.ctrlKey;
 
       if (hasUndoModifier && key === 'z') {
+         if (useSharedDesignControllers) return;
          e.preventDefault();
          const changed = e.shiftKey ? redoDesignHistory() : undoDesignHistory();
          if (!changed) setDesignStatus(e.shiftKey ? 'Nothing to redo.' : 'Nothing to undo.');
@@ -5824,6 +6465,7 @@ async function setupApp() {
       }
 
       if (!isMac && e.ctrlKey && key === 'y') {
+         if (useSharedDesignControllers) return;
          e.preventDefault();
          if (!redoDesignHistory()) setDesignStatus('Nothing to redo.');
          return;
@@ -6370,12 +7012,81 @@ async function setupApp() {
    resize();
    requestRender();
 
-   return { loadModel };
+   // Detach the WebGPU-local form listeners before installing the same design
+   // controllers used by WebGL and software. Render-only WebGPU state remains
+   // local; authored geometry always returns through applyStoneData().
+   const designForm = document.getElementById('designForm');
+   if (designForm) designForm.replaceWith(designForm.cloneNode(true));
+   useSharedDesignControllers = true;
+   const sharedDesignApp = {
+      getStone: () => currentStone,
+      getCameraState: () => ({
+         modelMatrix: modelMat,
+         viewMatrix: viewMat,
+         projectionMatrix: projMat,
+         cameraPosition: [...cameraPos],
+      }),
+      setStone(filename, stone) {
+         applyStoneData(filename, stone, { syncDesignFromStone: false, isDesign: true });
+      },
+      requestRender,
+      requestGraphUpdate() { updateGraph(); },
+   };
+   setupFallbackDesignOverlay(canvas, sharedDesignApp, {
+      useOcclusionCulling: false,
+      useFaceCulling: true,
+      useProjectedFaceCulling: true,
+      drawBaseEdges: false,
+   });
+
+   return {
+      async loadModel(filename, url) {
+         await loadModel(filename, url);
+         fallbackDesignOverlay?.setModel(currentStone);
+         fallbackDesignController?.onStoneLoaded(currentStone, filename);
+      },
+      renderer: 'webgpu',
+   };
 }
 
 // ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
+function getRendererPreferenceFromLocation() {
+   const params = new URLSearchParams(window.location.search || '');
+   const raw = String(params.get('renderer') || '').trim().toLowerCase();
+   if (raw === 'webgpu' || raw === 'webgl' || raw === 'software') return raw;
+   return null;
+}
+
+function getRendererAttemptOrder(preferredRenderer) {
+   if (!preferredRenderer) return ['webgpu', 'webgl', 'software'];
+   if (preferredRenderer === 'webgpu') return ['webgpu', 'webgl', 'software'];
+   if (preferredRenderer === 'webgl') return ['webgl', 'software'];
+   if (preferredRenderer === 'software') return ['software'];
+   return ['webgpu', 'webgl', 'software'];
+}
+
+async function setupAppWithRendererFallback(preferredRenderer) {
+   const attempts = getRendererAttemptOrder(preferredRenderer);
+   for (const renderer of attempts) {
+      try {
+         if (renderer === 'webgpu') {
+            const app = await setupWebGPUApp();
+            if (app) return app;
+         } else if (renderer === 'webgl') {
+            const app = await setupWebGLPreviewApp();
+            if (app) return app;
+         } else if (renderer === 'software') {
+            return setupOrthoPreviewApp();
+         }
+      } catch (error) {
+         console.warn(`Renderer ${renderer} failed; trying fallback.`, error);
+      }
+   }
+   return null;
+}
+
 function getStartupModelFromLocation(defaultName, defaultUrl) {
    const params = new URLSearchParams(window.location.search || '');
    let candidate = params.get('url') || params.get('file') || params.get('model');
@@ -6408,7 +7119,8 @@ function getStartupModelFromLocation(defaultName, defaultUrl) {
    return { name: derivedName, url: resolvedUrl, fromQuery: true };
 }
 
-const app = await setupApp();
+const preferredRenderer = getRendererPreferenceFromLocation();
+const app = await setupAppWithRendererFallback(preferredRenderer);
 if (app) {
    const defaultName = 'Eye_of_Zul.asc';
    const defaultUrl = './models/Eye_of_Zul.asc';
@@ -6422,4 +7134,6 @@ if (app) {
          await app.loadModel(defaultName, defaultUrl);
       }
    }
+} else {
+   alert('No supported renderer backend is available.');
 }
