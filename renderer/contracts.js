@@ -1,6 +1,10 @@
 /**
  * Renderer-neutral data contracts. Backends may expose only the capabilities
  * they support; consumers must not depend on a graphics API object.
+ *
+ * Interactive renderers may additionally expose getCameraState(), returning
+ * modelMatrix, viewMatrix, and projectionMatrix. UI overlays use that state
+ * for picking instead of reaching into renderer-specific camera objects.
  */
 
 export const FRAME_CAPABILITIES = Object.freeze({

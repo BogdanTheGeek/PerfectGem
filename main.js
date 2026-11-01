@@ -30,10 +30,16 @@ import {
 import { exportInProgress, setupExporter } from './video.js';
 import { renderOrtho } from './ortho.js';
 import { createFrameProvider, createRendererBackend, FRAME_CAPABILITIES } from './renderer/contracts.js';
-import { sampleSoftwareGraphSweep } from './renderer/software-graph-sampler.js';
+import {
+   createSoftwareRaytracer,
+   sampleSoftwareGraphSweep,
+   sampleSoftwareGraphSweepAsync,
+} from './renderer/software-graph-sampler.js';
 import { packWebGPUUniforms } from './renderer/webgpu-uniforms.js';
 import { loadWebGPUShaderSources } from './renderer/webgpu-shaders.js';
 import { setupWebGLRendererApp } from './renderer/webgl-backend.js';
+import { createDesignOverlayController } from './renderer/design-overlay-controller.js';
+import { createFacetDesignController } from './renderer/facet-design-controller.js';
 
 const { renderShaderSource: shaderSource, graphComputeShaderSource: computeShaderSource } = await loadWebGPUShaderSources();
 // Toggle debug overlays/features
@@ -495,6 +501,39 @@ function createRendererStatusLabel(text) {
    document.body.appendChild(label);
 }
 
+function getFallbackViewportLayout() {
+   const viewportWidth = window.innerWidth;
+   const viewportHeight = window.innerHeight;
+   if (viewportWidth <= 960) {
+      return { width: viewportWidth, height: viewportHeight, left: 0, top: 0 };
+   }
+   const controlsLeft = panel?.getBoundingClientRect?.().left;
+   const usableWidth = Number.isFinite(controlsLeft)
+      ? Math.max(2, Math.floor(controlsLeft - 8))
+      : viewportWidth;
+   const side = Math.max(2, Math.floor(Math.min(usableWidth, viewportHeight)));
+   return {
+      width: side,
+      height: side,
+      left: Math.round((usableWidth - side) * 0.5),
+      top: Math.round((viewportHeight - side) * 0.5),
+   };
+}
+
+function applyFallbackViewportLayout(canvas, renderScale = 1) {
+   const layout = getFallbackViewportLayout();
+   canvas.style.position = 'fixed';
+   canvas.style.width = `${layout.width}px`;
+   canvas.style.height = `${layout.height}px`;
+   canvas.style.left = `${layout.left}px`;
+   canvas.style.top = `${layout.top}px`;
+   return {
+      ...layout,
+      pixelWidth: Math.max(2, Math.floor(layout.width * renderScale)),
+      pixelHeight: Math.max(2, Math.floor(layout.height * renderScale)),
+   };
+}
+
 async function loadStoneFromUrl(filename, url) {
    const ext = filename.toLowerCase().match(/\.\w+$/)?.[0] ?? '';
    const response = await fetch(url);
@@ -546,12 +585,52 @@ function installFallbackPointerControls(canvas, app) {
    });
 }
 
+let fallbackDesignOverlay = null;
+let fallbackDesignController = null;
+function setupFallbackDesignOverlay(canvas, app, options = {}) {
+   fallbackDesignController?.dispose();
+   fallbackDesignOverlay?.dispose();
+   fallbackDesignOverlay = createDesignOverlayController({
+      canvas,
+      getStone: () => app.getStone?.(),
+      getCameraState: () => app.getCameraState?.(),
+      isDesignMode: () => document.getElementById('gemDesignTabPanel')?.classList.contains('active') ?? false,
+      useOcclusionCulling: options.useOcclusionCulling,
+      useFaceCulling: options.useFaceCulling,
+      useProjectedFaceCulling: options.useProjectedFaceCulling,
+      drawBaseEdges: options.drawBaseEdges,
+      onSelectionChanged(selection) {
+         fallbackDesignController?.onSelectionChanged(selection);
+      },
+   });
+   fallbackDesignController = createFacetDesignController({
+      app,
+      ui,
+      overlay: fallbackDesignOverlay,
+      onDesignChanged(definition) {
+         designFacets = definition.facets.map((facet, index) => normalizeDesignFacet(facet, index));
+      },
+   });
+   if (app.getStone?.()) fallbackDesignController.onStoneLoaded(app.getStone());
+   return fallbackDesignOverlay;
+}
+
 function setupFallbackUiBindings(app) {
    if (uiControls) return uiControls;
    uiControls = buildUI(ui, {
-      onRenderOutputChanged() { app.requestRender?.(); },
-      onGraphParamsChanged() { app.requestRender?.(); },
-      onRenderScaleChanged() { app.requestRender?.(); },
+      onRenderOutputChanged() {
+         app.setUiState?.(ui);
+         app.requestRender?.();
+      },
+      onGraphParamsChanged() {
+         app.setUiState?.(ui);
+         app.requestRender?.();
+         app.requestGraphUpdate?.();
+      },
+      onRenderScaleChanged() {
+         app.setUiState?.(ui);
+         app.requestRender?.();
+      },
       onGemTopTabChanged() { },
       onCutsNavigate() { },
       onReset() { app.resetView?.(); },
@@ -564,67 +643,65 @@ function setupFallbackUiBindings(app) {
    return uiControls;
 }
 
-let fallbackScalingControls = null;
-function setupFallbackScalingControls(app) {
-   if (fallbackScalingControls) return fallbackScalingControls;
-   const crownSlider = document.getElementById('designCrownRatioSlider');
-   const pavilionSlider = document.getElementById('designPavilionRatioSlider');
-   const crownLabel = document.getElementById('designCrownRatio');
-   const pavilionLabel = document.getElementById('designPavilionRatio');
-   const applyButton = document.getElementById('designApplyScaleBtn');
-   const resetButton = document.getElementById('designResetScaleBtn');
-   let sourceStone = null;
-   let filename = '';
-
-   const applyPreview = () => {
-      if (!sourceStone) return;
-      const crown = parseFloat(crownSlider?.value) || 1;
-      const pavilion = parseFloat(pavilionSlider?.value) || 1;
-      let scaled = sourceStone;
-      if (Math.abs(crown - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, crown, true);
-      if (Math.abs(pavilion - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, pavilion, false);
-      app.setStone?.(filename, scaled);
-      app.requestRender?.();
-      if (designStatusEl) designStatusEl.textContent = `Scale preview crown=${crown.toFixed(3)} pavilion=${pavilion.toFixed(3)}`;
+function setupFallbackGraph(app) {
+   let requestId = 0;
+   let timer = null;
+   const update = () => {
+      const stone = app.getStone?.();
+      if (!stone?.vertexData || !graphSvgEl) return;
+      const currentRequest = ++requestId;
+      graphStatusEl.textContent = 'Updating graph…';
+      clearTimeout(timer);
+      timer = setTimeout(async () => {
+         if (currentRequest !== requestId) return;
+         const series = await sampleSoftwareGraphSweepAsync({
+            vertexData: stone.vertexData,
+            tiltValues: GRAPH_TILT_VALUES,
+            modes: GRAPH_MODES,
+            hasTableFacet: hasUniqueTableFacet(stone.facets),
+            material: ui,
+         }, () => currentRequest === requestId);
+         if (!series || currentRequest !== requestId) return;
+         const width = Math.max(220, Math.round(graphSvgEl.clientWidth || 388));
+         const height = Math.max(140, Math.round(graphSvgEl.clientHeight || 220));
+         graphSvgEl.setAttribute('viewBox', `0 0 ${width} ${height}`);
+         graphSvgEl.innerHTML = buildGraphSvgInner(series, width, height, GRAPH_THEME_DARK);
+         graphStatusEl.textContent = 'Software optical trace';
+      }, 150);
    };
+   app.requestGraphUpdate = update;
+   return update;
+}
 
-   const updatePreview = () => {
-      if (crownLabel) crownLabel.textContent = (parseFloat(crownSlider?.value) || 1).toFixed(3);
-      if (pavilionLabel) pavilionLabel.textContent = (parseFloat(pavilionSlider?.value) || 1).toFixed(3);
-      applyPreview();
+function setupFallbackPerformanceMetrics(app) {
+   const overlay = document.getElementById('fpsOverlay');
+   const toggle = document.getElementById('perfStatsToggle');
+   if (!overlay || !toggle) return;
+   let frameCount = 0;
+   let lastSample = performance.now();
+   let visible = false;
+   const render = () => {
+      if (!visible) return;
+      frameCount++;
+      const now = performance.now();
+      if (now - lastSample < 500) return;
+      overlay.textContent = `${app.renderer.toUpperCase()} presentation ${((frameCount * 1000) / (now - lastSample)).toFixed(1)} fps`;
+      frameCount = 0;
+      lastSample = now;
    };
-
-   crownSlider?.addEventListener('input', updatePreview);
-   pavilionSlider?.addEventListener('input', updatePreview);
-   applyButton?.addEventListener('click', () => {
-      if (!sourceStone) return;
-      const crown = parseFloat(crownSlider?.value) || 1;
-      const pavilion = parseFloat(pavilionSlider?.value) || 1;
-      let scaled = sourceStone;
-      if (Math.abs(crown - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, crown, true);
-      if (Math.abs(pavilion - 1) > 1e-6) scaled = stretchStoneByVertices(scaled, pavilion, false);
-      sourceStone = scaled;
-      app.setStone?.(filename, sourceStone);
-      crownSlider.value = '1';
-      pavilionSlider.value = '1';
-      updatePreview();
-      if (designStatusEl) designStatusEl.textContent = 'Scale applied';
+   const samplePresentation = () => {
+      render();
+      if (visible) requestAnimationFrame(samplePresentation);
+   };
+   toggle.addEventListener('change', () => {
+      visible = toggle.checked;
+      overlay.style.display = visible ? 'block' : 'none';
+      if (!visible) overlay.textContent = '';
+      lastSample = performance.now();
+      frameCount = 0;
+      if (visible) requestAnimationFrame(samplePresentation);
    });
-   resetButton?.addEventListener('click', () => {
-      if (!sourceStone) return;
-      crownSlider.value = '1';
-      pavilionSlider.value = '1';
-      updatePreview();
-      if (designStatusEl) designStatusEl.textContent = 'Scale reset';
-   });
-
-   fallbackScalingControls = {
-      setSourceStone(nextFilename, stone) {
-         filename = nextFilename;
-         sourceStone = stone;
-      },
-   };
-   return fallbackScalingControls;
+   app.recordFrame = render;
 }
 
 function populateFallbackModelUi(filename, stone) {
@@ -664,20 +741,64 @@ function setupFallbackFacetTabs() {
 }
 
 let fallbackPanelsBound = false;
+function toggleFloatingPanel(panelEl, toggleEl, expandedSizeRef, name, onExpand) {
+   const willCollapse = !panelEl.classList.contains('collapsed');
+   if (window.innerWidth > 960) {
+      const isLeftAnchored = panelEl.dataset.anchorSide === 'left';
+      if (willCollapse) {
+         const rect = panelEl.getBoundingClientRect();
+         expandedSizeRef.width = Math.max(260, Math.round(rect.width));
+         expandedSizeRef.height = Math.max(120, Math.round(rect.height));
+         const rightPx = Math.max(0, Math.round(window.innerWidth - rect.right));
+         const leftPx = Math.max(0, Math.round(rect.left));
+         panelEl.style.position = 'fixed';
+         panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
+         panelEl.style.top = `${Math.max(0, Math.round(rect.top))}px`;
+         panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
+         panelEl.style.bottom = 'auto';
+         panelEl.style.width = '200px';
+         panelEl.style.height = 'auto';
+      } else {
+         const desiredWidth = Math.max(260, Math.round(expandedSizeRef.width || 260));
+         const desiredHeight = Math.max(120, Math.round(expandedSizeRef.height || 120));
+         const rect = panelEl.getBoundingClientRect();
+         const rightPx = Math.max(0, Math.min(
+            Math.max(0, window.innerWidth - desiredWidth),
+            Math.round(window.innerWidth - rect.right),
+         ));
+         const leftPx = Math.max(0, Math.min(
+            Math.max(0, window.innerWidth - desiredWidth),
+            Math.round(rect.left),
+         ));
+         panelEl.style.position = 'fixed';
+         panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
+         panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
+         panelEl.style.width = `${desiredWidth}px`;
+         panelEl.style.height = `${desiredHeight}px`;
+         panelEl.style.zIndex = '120';
+      }
+   } else {
+      panelEl.style.width = '';
+      panelEl.style.height = '';
+   }
+   panelEl.classList.toggle('collapsed', willCollapse);
+   toggleEl.textContent = willCollapse ? '+' : '−';
+   toggleEl.setAttribute('aria-label', willCollapse ? `Expand ${name}` : `Minimize ${name}`);
+   if (!willCollapse) onExpand?.();
+}
+
 function setupFallbackPanelBindings() {
    if (fallbackPanelsBound) return;
    fallbackPanelsBound = true;
    const bindings = [
-      [lightReturnPanel, graphToggleEl],
-      [facetPanel, facetToggleEl],
-      [gemLibraryPanel, gemLibraryToggleEl],
-      [designPanel, designToggleEl],
+      [lightReturnPanel, graphToggleEl, { width: 420, height: 320 }, 'graph'],
+      [facetPanel, facetToggleEl, { width: 420, height: 260 }, 'facet notes'],
+      [gemLibraryPanel, gemLibraryToggleEl, { width: 420, height: 320 }, 'gem library'],
    ];
-   for (const [panelEl, toggleEl] of bindings) {
+   for (const [panelEl, toggleEl, expandedSize, name] of bindings) {
       if (!panelEl || !toggleEl) continue;
       toggleEl.addEventListener('click', () => {
-         const collapsed = panelEl.classList.toggle('collapsed');
-         toggleEl.textContent = collapsed ? '+' : '−';
+         toggleFloatingPanel(panelEl, toggleEl, expandedSize, name);
       });
    }
 }
@@ -754,6 +875,30 @@ function setupFallbackPanelLayoutControls() {
          handle.addEventListener('pointercancel', endResize);
       }
    }
+   requestAnimationFrame(() => {
+      if (window.innerWidth <= 960) return;
+      const layouts = panels
+         .map(({ panel: panelEl }) => ({ panelEl, rect: panelEl?.getBoundingClientRect() }))
+         .filter(({ panelEl, rect }) => panelEl && rect);
+      for (const { panelEl, rect } of layouts) {
+         panelEl.style.position = 'fixed';
+         panelEl.style.left = `${Math.max(0, Math.round(rect.left))}px`;
+         panelEl.style.top = `${Math.max(0, Math.round(rect.top))}px`;
+         panelEl.style.right = 'auto';
+         panelEl.style.bottom = 'auto';
+         panelEl.style.width = `${Math.round(rect.width)}px`;
+         panelEl.style.height = `${Math.round(rect.height)}px`;
+         panelEl.style.zIndex = '120';
+      }
+      if (gemLibraryPanel) {
+         gemLibraryPanel.dataset.anchorSide = 'left';
+         gemLibraryPanel.style.left = '18px';
+         gemLibraryPanel.style.top = '18px';
+         gemLibraryPanel.style.right = 'auto';
+         gemLibraryPanel.style.width = `${Math.max(480, Math.round(gemLibraryPanel.getBoundingClientRect().width))}px`;
+         gemLibraryPanel.style.height = `${Math.max(120, Math.round(window.innerHeight - 36))}px`;
+      }
+   });
 }
 
 let fallbackDesignNoticeBound = false;
@@ -791,48 +936,41 @@ function stoneToOrthoFaces(stone) {
 
 async function setupOrthoPreviewApp() {
    const canvas = document.getElementById('gpuCanvas');
-   createRendererStatusLabel('Renderer: software (orthographic preview)');
+   createRendererStatusLabel('Renderer: software ray tracing');
 
    let stone = null;
+   let raytracer = null;
    let currentRotX = 0;
    let currentRotY = 0;
    let framePending = false;
+   let rerenderRequested = false;
    let tiltAnimating = false;
    let tiltBaseX = 0;
    let tiltBaseY = 0;
    let tiltStartTs = 0;
 
-   function viewVectorFromRotation(rotX, rotY) {
-      const sx = Math.sin(rotX);
-      const cx = Math.cos(rotX);
-      const sy = Math.sin(rotY);
-      const cy = Math.cos(rotY);
-      return [sy * cx, -sx, cy * cx];
-   }
-
-   const draw = () => {
+   const draw = async () => {
       if (!stone) return;
-      canvas.width = Math.max(2, Math.floor(window.innerWidth * window.devicePixelRatio));
-      canvas.height = Math.max(2, Math.floor(window.innerHeight * window.devicePixelRatio));
-      canvas.style.width = '100vw';
-      canvas.style.height = '100vh';
-      canvas.style.left = '0';
-      canvas.style.top = '0';
-      renderOrtho(
-         stoneToOrthoFaces(stone),
-         viewVectorFromRotation(currentRotX, currentRotY),
-         canvas,
-         1 / Math.max(0.1, computeMeshBoundsRadius(stone.vertexData)),
-         stone.sourceGear || 96,
-      );
+      const dpr = Math.max(1, window.devicePixelRatio || 1);
+      const scale = ui.renderScale > 0 ? ui.renderScale : dpr;
+      const layout = applyFallbackViewportLayout(canvas, Math.max(0.5, Math.min(dpr, scale)));
+      canvas.width = layout.pixelWidth;
+      canvas.height = layout.pixelHeight;
+      await raytracer?.render({ canvas, material: ui, rotation: { x: currentRotX, y: currentRotY } });
    };
 
    function requestRender() {
+      rerenderRequested = true;
       if (framePending) return;
       framePending = true;
-      requestAnimationFrame(() => {
+      requestAnimationFrame(async () => {
+         while (rerenderRequested) {
+            rerenderRequested = false;
+            await draw();
+            app.recordFrame?.();
+            fallbackDesignOverlay?.draw();
+         }
          framePending = false;
-         draw();
       });
    }
 
@@ -847,21 +985,47 @@ async function setupOrthoPreviewApp() {
       const amp = (ui.tiltAngleDeg || 10) * Math.PI / 180;
       currentRotX = tiltBaseX + Math.sin(elapsedSec * Math.PI) * amp;
       currentRotY = tiltBaseY + Math.cos(elapsedSec * Math.PI) * amp;
-      draw();
+      requestRender();
       requestAnimationFrame(tickTilt);
+   }
+
+   function getCameraState() {
+      const model = mat4.create();
+      const view = mat4.create();
+      const projection = mat4.create();
+      const cameraDistance = Math.max(0.1, (ui.focalLength || 200) / 10);
+      // The CPU tracer transforms points with rotateX followed by rotateY.
+      mat4.rotateY(model, model, currentRotY);
+      mat4.rotateX(model, model, currentRotX);
+      mat4.lookAt(view, [0, 0, cameraDistance], [0, 0, 0], [0, 1, 0]);
+      const sensorHalf = 5 * Math.tan(Math.PI / 8) * 0.70;
+      const aspect = Math.max(0.01, canvas.clientWidth / Math.max(1, canvas.clientHeight));
+      mat4.perspective(projection, 2 * Math.atan(sensorHalf / cameraDistance), aspect, 0.1, 200);
+      return {
+         modelMatrix: model,
+         viewMatrix: view,
+         projectionMatrix: projection,
+         cameraPosition: [0, 0, cameraDistance],
+      };
    }
 
    const app = {
       async loadModel(filename, url) {
          stone = await loadStoneFromUrl(filename, url);
-         fallbackScalingControls?.setSourceStone(filename, stone);
+         raytracer = createSoftwareRaytracer(stone);
          populateFallbackModelUi(filename, stone);
+         fallbackDesignOverlay?.setModel(stone);
+         fallbackDesignController?.onStoneLoaded(stone, filename);
          requestRender();
+         app.requestGraphUpdate?.();
       },
       setStone(filename, nextStone) {
          stone = nextStone;
+         raytracer = createSoftwareRaytracer(stone);
          populateFallbackModelUi(filename, stone);
+         fallbackDesignOverlay?.setModel(stone);
          requestRender();
+         app.requestGraphUpdate?.();
       },
       requestRender,
       setRotation(rotX, rotY) {
@@ -873,6 +1037,7 @@ async function setupOrthoPreviewApp() {
       getRotation() {
          return { x: currentRotX, y: currentRotY };
       },
+      getCameraState,
       resetView() {
          stopTilt();
          currentRotX = 0;
@@ -897,6 +1062,9 @@ async function setupOrthoPreviewApp() {
       setUiState() {
          requestRender();
       },
+      getStone() {
+         return stone;
+      },
       renderer: 'software',
    };
 
@@ -904,8 +1072,10 @@ async function setupOrthoPreviewApp() {
    setupFallbackFacetTabs();
    setupFallbackPanelBindings();
    setupFallbackPanelLayoutControls();
-   setupFallbackScalingControls(app);
+   setupFallbackGraph(app);
+   setupFallbackPerformanceMetrics(app);
    installFallbackPointerControls(canvas, app);
+   setupFallbackDesignOverlay(canvas, app);
    window.addEventListener('resize', requestRender);
    return app;
 }
@@ -917,21 +1087,48 @@ async function setupWebGLPreviewApp() {
       loadStoneFromUrl,
       computeMeshBoundsRadius,
       createStatusLabel: createRendererStatusLabel,
+      getViewportLayout: (scale) => applyFallbackViewportLayout(
+         document.getElementById('gpuCanvas'),
+         scale,
+      ),
    });
    if (!app) return null;
    const originalLoadModel = app.loadModel.bind(app);
    app.loadModel = async (filename, url) => {
       const stone = await originalLoadModel(filename, url);
-      fallbackScalingControls?.setSourceStone(filename, stone);
       populateFallbackModelUi(filename, stone);
+      fallbackDesignOverlay?.setModel(stone);
+      fallbackDesignController?.onStoneLoaded(stone, filename);
+      app.requestGraphUpdate?.();
+   };
+   const originalSetStone = app.setStone.bind(app);
+   app.setStone = (filename, stone) => {
+      originalSetStone(filename, stone);
+      populateFallbackModelUi(filename, stone);
+      fallbackDesignOverlay?.setModel(stone);
+      app.requestGraphUpdate?.();
+   };
+   const originalSetRotation = app.setRotation.bind(app);
+   app.setRotation = (rotX, rotY) => {
+      originalSetRotation(rotX, rotY);
+      app.recordFrame?.();
+      fallbackDesignOverlay?.draw();
+   };
+   const originalRequestRender = app.requestRender.bind(app);
+   app.requestRender = () => {
+      originalRequestRender();
+      app.recordFrame?.();
+      fallbackDesignOverlay?.draw();
    };
    app.setUiState?.(ui);
    setupFallbackUiBindings(app);
    setupFallbackFacetTabs();
    setupFallbackPanelBindings();
    setupFallbackPanelLayoutControls();
-   setupFallbackScalingControls(app);
+   setupFallbackGraph(app);
+   setupFallbackPerformanceMetrics(app);
    installFallbackPointerControls(document.getElementById('gpuCanvas'), app);
+   setupFallbackDesignOverlay(document.getElementById('gpuCanvas'), app);
    return app;
 }
 
@@ -2687,7 +2884,7 @@ async function setupWebGPUApp() {
          if (Date.now() < designFacetReorderSuppressClickUntil) return;
          const rowEl = e.target.closest('tr[data-id]');
          if (!rowEl || !rootEl.contains(rowEl)) return;
-         if (e.target.closest('[data-remove]')) return;
+         if (e.target.closest('input, select, textarea, button, label, [data-remove]')) return;
 
          dragState = {
             pointerId: e.pointerId,
@@ -2763,57 +2960,7 @@ async function setupWebGPUApp() {
 
    // Toggles a panel's collapsed state. DOM class is the sole source of truth.
    function togglePanel(panelEl, toggleEl, expandedSizeRef, name, onExpand) {
-      const willCollapse = !panelEl.classList.contains('collapsed');
-      const isLeftAnchored = panelEl.dataset.anchorSide === 'left';
-      if (window.innerWidth > 960) {
-         if (willCollapse) {
-            const rect = panelEl.getBoundingClientRect();
-            expandedSizeRef.width = Math.max(260, Math.round(rect.width));
-            expandedSizeRef.height = Math.max(120, Math.round(rect.height));
-            const rightPx = Math.max(0, Math.round(window.innerWidth - rect.right));
-            const leftPx = Math.max(0, Math.round(rect.left));
-            const topPx = Math.max(0, Math.round(rect.top));
-            panelEl.dataset.anchorRightPx = String(rightPx);
-            panelEl.dataset.anchorLeftPx = String(leftPx);
-            panelEl.dataset.anchorTopPx = String(topPx);
-            panelEl.style.position = 'fixed';
-            panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
-            panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
-            panelEl.style.top = `${topPx}px`;
-            panelEl.style.bottom = 'auto';
-            panelEl.style.width = '200px';
-            panelEl.style.height = 'auto';
-         } else {
-            const desiredWidth = Math.max(260, Math.round(expandedSizeRef.width || 260));
-            const desiredHeight = Math.max(120, Math.round(expandedSizeRef.height || 120));
-            const rect = panelEl.getBoundingClientRect();
-            const rawRight = Math.round(window.innerWidth - rect.right);
-            const rawLeft = Math.round(rect.left);
-            const rawTop = Math.round(rect.top);
-            const maxRight = Math.max(0, window.innerWidth - desiredWidth);
-            const maxLeft = Math.max(0, window.innerWidth - desiredWidth);
-            const maxTop = Math.max(0, window.innerHeight - desiredHeight);
-            const rightPx = Math.max(0, Math.min(maxRight, rawRight));
-            const leftPx = Math.max(0, Math.min(maxLeft, rawLeft));
-            const topPx = Math.max(0, Math.min(maxTop, rawTop));
-
-            panelEl.style.position = 'fixed';
-            panelEl.style.left = isLeftAnchored ? `${leftPx}px` : 'auto';
-            panelEl.style.right = isLeftAnchored ? 'auto' : `${rightPx}px`;
-            panelEl.style.top = `${topPx}px`;
-            panelEl.style.bottom = 'auto';
-            panelEl.style.width = `${desiredWidth}px`;
-            panelEl.style.height = `${desiredHeight}px`;
-            panelEl.style.zIndex = '120';
-         }
-      } else {
-         panelEl.style.width = '';
-         panelEl.style.height = '';
-      }
-      panelEl.classList.toggle('collapsed', willCollapse);
-      toggleEl.textContent = willCollapse ? '+' : '−';
-      toggleEl.setAttribute('aria-label', willCollapse ? `Expand ${name}` : `Minimize ${name}`);
-      if (!willCollapse) onExpand?.();
+      toggleFloatingPanel(panelEl, toggleEl, expandedSizeRef, name, onExpand);
    }
 
    function ensureDesktopFloatingPanel(panelEl) {
@@ -3552,6 +3699,9 @@ async function setupWebGPUApp() {
    const invModelMat = mat4.create();
 
    let currentGemTab = 'controls';
+   // WebGPU keeps its render pipeline here, but design interaction is shared
+   // with the fallback renderers after the legacy bindings are detached.
+   let useSharedDesignControllers = false;
    let cutsSourceStone = null;
    let cutsSequence = [];
    let cutsAngleIndex = 0;
@@ -5359,6 +5509,7 @@ async function setupWebGPUApp() {
             tiltValues: GRAPH_TILT_VALUES,
             modes: GRAPH_MODES,
             hasTableFacet: modelHasTableFacet,
+            material: ui,
          });
       }
       if (!seriesList) return;
@@ -6254,7 +6405,7 @@ async function setupWebGPUApp() {
 
    function endDrag(e) {
       if (e.pointerId !== dragPointerId) return;
-      if (currentGemTab === 'design' && designClickStart && designClickStart.pointerId === e.pointerId && !designClickStart.moved) {
+      if (!useSharedDesignControllers && currentGemTab === 'design' && designClickStart && designClickStart.pointerId === e.pointerId && !designClickStart.moved) {
          updateDesignHoverFromPointer(e.clientX, e.clientY, true);
          if (designHover) {
             // Design mode always accumulates selection; no modifier key needed.
@@ -6272,7 +6423,7 @@ async function setupWebGPUApp() {
    gpuCanvas.addEventListener('pointercancel', endDrag);
 
    gpuCanvas.addEventListener('pointermove', (e) => {
-      updateDesignHoverFromPointer(e.clientX, e.clientY);
+      if (!useSharedDesignControllers) updateDesignHoverFromPointer(e.clientX, e.clientY);
 
       if (e.pointerId !== dragPointerId) return;
       if (designClickStart && designClickStart.pointerId === e.pointerId) {
@@ -6306,6 +6457,7 @@ async function setupWebGPUApp() {
       const hasUndoModifier = isMac ? e.metaKey : e.ctrlKey;
 
       if (hasUndoModifier && key === 'z') {
+         if (useSharedDesignControllers) return;
          e.preventDefault();
          const changed = e.shiftKey ? redoDesignHistory() : undoDesignHistory();
          if (!changed) setDesignStatus(e.shiftKey ? 'Nothing to redo.' : 'Nothing to undo.');
@@ -6313,6 +6465,7 @@ async function setupWebGPUApp() {
       }
 
       if (!isMac && e.ctrlKey && key === 'y') {
+         if (useSharedDesignControllers) return;
          e.preventDefault();
          if (!redoDesignHistory()) setDesignStatus('Nothing to redo.');
          return;
@@ -6859,7 +7012,41 @@ async function setupWebGPUApp() {
    resize();
    requestRender();
 
-   return { loadModel, renderer: 'webgpu' };
+   // Detach the WebGPU-local form listeners before installing the same design
+   // controllers used by WebGL and software. Render-only WebGPU state remains
+   // local; authored geometry always returns through applyStoneData().
+   const designForm = document.getElementById('designForm');
+   if (designForm) designForm.replaceWith(designForm.cloneNode(true));
+   useSharedDesignControllers = true;
+   const sharedDesignApp = {
+      getStone: () => currentStone,
+      getCameraState: () => ({
+         modelMatrix: modelMat,
+         viewMatrix: viewMat,
+         projectionMatrix: projMat,
+         cameraPosition: [...cameraPos],
+      }),
+      setStone(filename, stone) {
+         applyStoneData(filename, stone, { syncDesignFromStone: false, isDesign: true });
+      },
+      requestRender,
+      requestGraphUpdate() { updateGraph(); },
+   };
+   setupFallbackDesignOverlay(canvas, sharedDesignApp, {
+      useOcclusionCulling: false,
+      useFaceCulling: true,
+      useProjectedFaceCulling: true,
+      drawBaseEdges: false,
+   });
+
+   return {
+      async loadModel(filename, url) {
+         await loadModel(filename, url);
+         fallbackDesignOverlay?.setModel(currentStone);
+         fallbackDesignController?.onStoneLoaded(currentStone, filename);
+      },
+      renderer: 'webgpu',
+   };
 }
 
 // ---------------------------------------------------------------------------

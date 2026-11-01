@@ -15,7 +15,7 @@ import {
    stretchStoneByVertices,
 } from './loaders.js';
 import { createFrameProvider, FRAME_CAPABILITIES } from './renderer/contracts.js';
-import { sampleSoftwareGraphSweep } from './renderer/software-graph-sampler.js';
+import { sampleSoftwareGraphSweep, sampleSoftwareGraphSweepAsync } from './renderer/software-graph-sampler.js';
 import { packWebGPUUniforms } from './renderer/webgpu-uniforms.js';
 
 // list all files in models folder
@@ -115,7 +115,7 @@ async function loadStoneFromModelFile(file) {
    throw new Error(`Unsupported file type: ${ext}`);
 }
 
-function testRendererContracts() {
+async function testRendererContracts() {
    const provider = createFrameProvider({
       capabilities: new Set([FRAME_CAPABILITIES.CANVAS]),
       maxTextureDimension2D: 4096,
@@ -139,6 +139,15 @@ function testRendererContracts() {
    });
    if (graph.length !== 2 || graph.some((series) => series.points.length !== 3)) {
       throw new Error('Software graph fallback returned an invalid graph shape.');
+   }
+   const asyncGraph = await sampleSoftwareGraphSweepAsync({
+      vertexData,
+      tiltValues: [0],
+      modes: [{ label: 'ISO', color: '#fff', mode: 0 }],
+      sampleSize: 4,
+   });
+   if (asyncGraph?.[0]?.points.length !== 1) {
+      throw new Error('Software graph refresh did not produce a graph tile.');
    }
 
    const uniforms = new Float32Array(80);
@@ -183,7 +192,7 @@ async function testRendererNeutralScaling() {
 
 
 async function test() {
-   testRendererContracts();
+   await testRendererContracts();
    await testRendererNeutralScaling();
    const args = process.argv.slice(2);
    const files = fs.readdirSync('./models');
