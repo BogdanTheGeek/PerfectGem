@@ -356,6 +356,64 @@
             user-select: none;
         }
         .designBtn:hover { border-color: rgba(255,255,255,.28); color: #fff; }
+        .sharePopupOverlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,.65);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 300;
+            padding: 16px;
+            box-sizing: border-box;
+        }
+        .sharePopupOverlay.open { display: flex; }
+        .sharePopup {
+            width: min(640px, 100%);
+            background: rgba(10,10,14,0.96);
+            border: 1px solid rgba(255,255,255,.16);
+            border-radius: 12px;
+            padding: 14px;
+            box-sizing: border-box;
+            color: #e8e8e8;
+            font: 12px/1.4 system-ui, sans-serif;
+            backdrop-filter: blur(8px);
+        }
+        .sharePopupTitle {
+            margin: 0 0 10px;
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: .04em;
+            text-transform: uppercase;
+            color: #fff;
+        }
+        .sharePopup input[type=text] {
+            width: 100%;
+            box-sizing: border-box;
+            background: #151520;
+            color: #f0f0f0;
+            border: 1px solid rgba(255,255,255,.2);
+            border-radius: 6px;
+            padding: 8px 10px;
+            font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        }
+        .sharePopupActions {
+            display: flex;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .sharePopupBtn {
+            flex: 1;
+            padding: 8px 10px;
+            text-align: center;
+            border-radius: 6px;
+            cursor: pointer;
+            border: 1px solid rgba(255,255,255,.18);
+            background: rgba(255,255,255,.07);
+            color: #ddd;
+            user-select: none;
+        }
+        .sharePopupBtn:hover { border-color: rgba(255,255,255,.3); color: #fff; }
         .designSubsection {
             margin: 0 0 10px;
             padding: 8px;
@@ -1006,6 +1064,7 @@
                         <div class="designBtnRow">
                             <div class="designBtn" id="designAddFacetBtn">Add Facet</div>
                             <div class="designBtn" id="designSaveGemBtn">Save</div>
+                            <div class="designBtn" id="designShareBtn">Share</div>
                         </div>
                         <div class="designBtnRow" style="margin-top:8px;">
                             <div class="designBtn" id="designRecenterBtn">Recenter Stone</div>
@@ -1112,6 +1171,16 @@
     </div>
 
     <div id="fpsOverlay"></div>
+    <div id="sharePopupOverlay" class="sharePopupOverlay" role="dialog" aria-modal="true" aria-labelledby="sharePopupTitle">
+        <div class="sharePopup">
+            <div id="sharePopupTitle" class="sharePopupTitle">Share Design Link</div>
+            <input type="text" id="shareLinkInput" readonly>
+            <div class="sharePopupActions">
+                <div class="sharePopupBtn" id="shareCopyBtn">Copy Link</div>
+                <div class="sharePopupBtn" id="shareCloseBtn">Close</div>
+            </div>
+        </div>
+    </div>
 
     <script type="module" src="main.js"></script>
     <script data-goatcounter="https://bogdanthegeek.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>

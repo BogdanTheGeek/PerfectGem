@@ -224,7 +224,12 @@ const designAddFacetBtn = document.getElementById('designAddFacetBtn');
 const designRecenterBtn = document.getElementById('designRecenterBtn');
 const designUnitSphereBtn = document.getElementById('designUnitSphereBtn');
 const designSaveGemBtn = document.getElementById('designSaveGemBtn');
+const designShareBtn = document.getElementById('designShareBtn');
 const designClearBtn = document.getElementById('designClearBtn');
+const sharePopupOverlayEl = document.getElementById('sharePopupOverlay');
+const shareLinkInputEl = document.getElementById('shareLinkInput');
+const shareCopyBtnEl = document.getElementById('shareCopyBtn');
+const shareCloseBtnEl = document.getElementById('shareCloseBtn');
 const graphToggleEl = document.getElementById('lightReturnToggle');
 const graphHeaderEl = document.getElementById('lightReturnHeader');
 const graphBodyEl = document.getElementById('lightReturnBody');
@@ -281,6 +286,28 @@ let modelHasTableFacet = false;
 let designSizeOverlayWidthMm = null;
 const GEM_LIBRARY_ORIGIN = 'https://bogdanthegeek.github.io';
 const GEM_LIBRARY_OPEN_MODEL_EVENT = 'gemlibrary:open-model';
+const SHARE_PARAM_NAME = 'share';
+const SHARE_STATE_VERSION = 1;
+const SHARE_UI_KEYS = Object.freeze([
+   'ri',
+   'cod',
+   'clarity',
+   'easingFuncName',
+   'axisAColor',
+   'axisBColor',
+   'axisCColor',
+   'backgroundColor',
+   'exitHighlight',
+   'headShadowColor',
+   'axisTiltXDeg',
+   'axisTiltYDeg',
+   'axisTiltZDeg',
+   'exitStrength',
+   'tiltAngleDeg',
+   'focalLength',
+   'renderScale',
+   'convexFacetMode',
+]);
 
 function applyPresetSpecificGravityToDesignCalculator(presetIndex) {
    if (!designSizeSgValueEl) return;
@@ -293,6 +320,39 @@ function applyPresetSpecificGravityToDesignCalculator(presetIndex) {
    designSizeSgValueEl.dispatchEvent(new Event('input', { bubbles: true }));
 }
 let gemLibraryBridgeInstalled = false;
+
+function encodeBase64UrlUtf8(value) {
+   const bytes = new TextEncoder().encode(String(value));
+   let binary = '';
+   const chunkSize = 0x8000;
+   for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, i + chunkSize);
+      binary += String.fromCharCode(...chunk);
+   }
+   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function decodeBase64UrlUtf8(value) {
+   const padded = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+   const padSize = (4 - (padded.length % 4)) % 4;
+   const base64 = padded + '='.repeat(padSize);
+   const binary = atob(base64);
+   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+   return new TextDecoder().decode(bytes);
+}
+
+function buildShareUiSnapshot(sourceUi) {
+   const out = {};
+   SHARE_UI_KEYS.forEach((key) => {
+      const value = sourceUi?.[key];
+      if (Array.isArray(value)) {
+         out[key] = value.slice(0, 3);
+      } else if (value !== undefined) {
+         out[key] = value;
+      }
+   });
+   return out;
+}
 
 const GRAPH_THEME_DARK = {
    bg: 'rgba(255,255,255,0.04)',
@@ -1168,6 +1228,106 @@ ${stoneRenderImg}
          if (!cutsReadoutEl) return;
          cutsReadoutEl.textContent = String(text || 'No cut sequence loaded.');
       },
+      applySharedUiState(sharedUi) {
+         if (!sharedUi || typeof sharedUi !== 'object') return false;
+         let changed = false;
+
+         const setNumber = (key, min = -Infinity, max = Infinity) => {
+            const raw = Number(sharedUi[key]);
+            if (!Number.isFinite(raw)) return;
+            const clamped = Math.min(max, Math.max(min, raw));
+            if (Number.isFinite(ui[key]) && ui[key] === clamped) return;
+            ui[key] = clamped;
+            changed = true;
+         };
+         const setInt = (key, min = -Infinity, max = Infinity) => {
+            const raw = Number(sharedUi[key]);
+            if (!Number.isFinite(raw)) return;
+            const intValue = Math.trunc(raw);
+            const clamped = Math.min(max, Math.max(min, intValue));
+            if (Number.isInteger(ui[key]) && ui[key] === clamped) return;
+            ui[key] = clamped;
+            changed = true;
+         };
+         const setColor = (key) => {
+            const value = sharedUi[key];
+            if (!Array.isArray(value) || value.length < 3) return;
+            const next = value.slice(0, 3).map((v, idx) => {
+               const numeric = Number(v);
+               const fallback = Number.isFinite(ui[key]?.[idx]) ? ui[key][idx] : 0;
+               if (!Number.isFinite(numeric)) return fallback;
+               return Math.min(1, Math.max(0, numeric));
+            });
+            if (
+               Array.isArray(ui[key])
+               && ui[key].length >= 3
+               && next.every((v, idx) => Math.abs(v - ui[key][idx]) <= 1e-9)
+            ) return;
+            ui[key] = next;
+            changed = true;
+         };
+
+         setNumber('ri', 1.0, 3.5);
+         setNumber('cod', 0.0, 0.2);
+         setNumber('clarity', 0.0, 1.0);
+         setNumber('axisTiltXDeg', -180, 180);
+         setNumber('axisTiltYDeg', -180, 180);
+         setNumber('axisTiltZDeg', -180, 180);
+         setNumber('exitStrength', 0.0, 1.0);
+         setNumber('tiltAngleDeg', 0, 45);
+         setNumber('focalLength', 50, 3000);
+         setNumber('renderScale', 0.5, Math.max(0.5, ui.renderScaleMax || 1));
+         setInt('lightMode', 0, 4);
+         setInt('convexFacetMode', 0, 1);
+         if (typeof sharedUi.easingFuncName === 'string' && easingFuncs[sharedUi.easingFuncName]) {
+            if (ui.easingFuncName !== sharedUi.easingFuncName) {
+               ui.easingFuncName = sharedUi.easingFuncName;
+               changed = true;
+            }
+         }
+         setColor('axisAColor');
+         setColor('axisBColor');
+         setColor('axisCColor');
+         setColor('backgroundColor');
+         setColor('exitHighlight');
+         setColor('headShadowColor');
+
+         riSlider.value = ui.ri;
+         riVal.textContent = ui.ri.toFixed(3);
+         codSlider.value = ui.cod;
+         codVal.textContent = ui.cod.toFixed(3);
+         claritySlider.value = ui.clarity;
+         clarityVal.textContent = ui.clarity.toFixed(3);
+         panel.querySelector('#tiltAngle').value = ui.tiltAngleDeg;
+         panel.querySelector('#tiltVal').textContent = ui.tiltAngleDeg.toFixed(0);
+         panel.querySelector('#focalSlider').value = ui.focalLength;
+         panel.querySelector('#focalVal').textContent = `${ui.focalLength} mm`;
+         panel.querySelector('#axisTiltXSlider').value = ui.axisTiltXDeg;
+         panel.querySelector('#axisTiltXVal').textContent = ui.axisTiltXDeg.toFixed(0);
+         panel.querySelector('#axisTiltYSlider').value = ui.axisTiltYDeg;
+         panel.querySelector('#axisTiltYVal').textContent = ui.axisTiltYDeg.toFixed(0);
+         panel.querySelector('#axisTiltZSlider').value = ui.axisTiltZDeg;
+         panel.querySelector('#axisTiltZVal').textContent = ui.axisTiltZDeg.toFixed(0);
+         panel.querySelector('#axisAColor').value = rgbToHex(ui.axisAColor);
+         panel.querySelector('#axisBColor').value = rgbToHex(ui.axisBColor);
+         panel.querySelector('#axisCColor').value = rgbToHex(ui.axisCColor);
+         panel.querySelector('#bgColor').value = rgbToHex(ui.backgroundColor);
+         panel.querySelector('#exitColor').value = rgbToHex(ui.exitHighlight);
+         panel.querySelector('#headShadowColor').value = rgbToHex(ui.headShadowColor);
+         panel.querySelector('#gPreset').value = '-1';
+         panel.querySelectorAll('#modes .mode').forEach((b) => {
+            b.classList.toggle('active', parseInt(b.dataset.mode, 10) === ui.lightMode);
+         });
+         easingButtonsContainer.querySelectorAll('.mode').forEach((b) => {
+            b.classList.toggle('active', b.dataset.ease === ui.easingFuncName);
+         });
+         applyBodyBackground(ui);
+         applyRenderScaleUi();
+         cbs.onGraphParamsChanged?.();
+         cbs.onRenderScaleChanged?.();
+         cbs.onRenderOutputChanged?.();
+         return changed;
+      },
    };
 }
 
@@ -1426,6 +1586,98 @@ async function setupApp() {
 
    function setDesignStatus(text) {
       designStatusEl.textContent = text;
+   }
+
+   function closeSharePopup() {
+      if (!sharePopupOverlayEl) return;
+      sharePopupOverlayEl.classList.remove('open');
+   }
+
+   function openSharePopup(link) {
+      if (!sharePopupOverlayEl || !shareLinkInputEl) return;
+      shareLinkInputEl.value = String(link || '');
+      sharePopupOverlayEl.classList.add('open');
+      shareLinkInputEl.focus();
+      shareLinkInputEl.select();
+   }
+
+   function buildSharePayload() {
+      return {
+         version: SHARE_STATE_VERSION,
+         ui: buildShareUiSnapshot(ui),
+         design: {
+            gear: parseInt(designGearEl.value, 10),
+            refractiveIndex: ui.ri,
+            facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
+            metadata: getMetadataFromDesign(),
+         },
+      };
+   }
+
+   function buildShareUrl() {
+      const payload = buildSharePayload();
+      const encoded = encodeBase64UrlUtf8(JSON.stringify(payload));
+      const out = new URL(window.location.href);
+      out.searchParams.set(SHARE_PARAM_NAME, encoded);
+      return out.toString();
+   }
+
+   function applySharedPayload(payload) {
+      if (!payload || typeof payload !== 'object') return false;
+      let applied = false;
+
+      if (payload.ui && uiControls?.applySharedUiState) {
+         uiControls.applySharedUiState(payload.ui);
+         applied = true;
+      }
+
+      const sharedDesign = payload.design;
+      if (sharedDesign && typeof sharedDesign === 'object') {
+         const sharedGear = parseInt(sharedDesign.gear, 10);
+         if (Number.isFinite(sharedGear) && sharedGear > 0) {
+            designGearEl.value = String(sharedGear);
+            applied = true;
+         }
+         if (sharedDesign.metadata && typeof sharedDesign.metadata === 'object') {
+            setMetadataToDesign(sharedDesign.metadata);
+            applied = true;
+         }
+         if (
+            Number.isFinite(Number(sharedDesign.refractiveIndex))
+            && (!payload.ui || !Number.isFinite(Number(payload.ui.ri)))
+         ) {
+            uiControls?.setRI?.(Number(sharedDesign.refractiveIndex));
+            applied = true;
+         }
+         if (Array.isArray(sharedDesign.facets)) {
+            designFacets = sharedDesign.facets.map((facet, idx) => normalizeDesignFacet(facet, idx));
+            renderDesignFacetList();
+            resetDesignHistory();
+            updateDesignStatusSummary();
+            scheduleDesignApply(true);
+            applied = true;
+         }
+      }
+
+      if (applied) {
+         setDesignStatus('Loaded shared design state.');
+      }
+      return applied;
+   }
+
+   function applySharedStateFromLocation() {
+      const params = new URLSearchParams(window.location.search || '');
+      const raw = params.get(SHARE_PARAM_NAME);
+      if (!raw) return false;
+      try {
+         const decodedText = decodeBase64UrlUtf8(raw);
+         const payload = JSON.parse(decodedText);
+         return applySharedPayload(payload);
+      } catch (err) {
+         console.warn('Invalid share payload.', err);
+         setDesignStatus('Share link invalid.');
+         return false;
+      }
    }
 
    function setDesignSizeValue(el, value, digits = 3) {
@@ -2611,6 +2863,56 @@ async function setupApp() {
       } catch (err) {
          console.error(err);
          setDesignStatus(`Save failed: ${err?.message || 'invalid design'}`);
+      }
+   });
+
+   designShareBtn?.addEventListener('click', () => {
+      try {
+         const shareUrl = buildShareUrl();
+         openSharePopup(shareUrl);
+         setDesignStatus('Share link ready.');
+      } catch (err) {
+         console.error(err);
+         setDesignStatus(`Share link failed: ${err?.message || 'error'}`);
+      }
+   });
+
+   shareCloseBtnEl?.addEventListener('click', () => {
+      closeSharePopup();
+   });
+
+   sharePopupOverlayEl?.addEventListener('click', (e) => {
+      if (e.target === sharePopupOverlayEl) closeSharePopup();
+   });
+
+   window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && sharePopupOverlayEl?.classList.contains('open')) {
+         closeSharePopup();
+      }
+   });
+
+   shareCopyBtnEl?.addEventListener('click', async () => {
+      const text = String(shareLinkInputEl?.value || '');
+      if (!text) {
+         setDesignStatus('Share link empty.');
+         return;
+      }
+
+      try {
+         if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(text);
+         } else if (shareLinkInputEl) {
+            shareLinkInputEl.focus();
+            shareLinkInputEl.select();
+            const copied = document.execCommand('copy');
+            if (!copied) throw new Error('Clipboard API unavailable');
+         } else {
+            throw new Error('Clipboard API unavailable');
+         }
+         setDesignStatus('Share link copied to clipboard.');
+      } catch (err) {
+         console.error(err);
+         setDesignStatus(`Copy failed: ${err?.message || 'error'}`);
       }
    });
 
@@ -6370,7 +6672,7 @@ async function setupApp() {
    resize();
    requestRender();
 
-   return { loadModel };
+   return { loadModel, applySharedStateFromLocation };
 }
 
 // ---------------------------------------------------------------------------
@@ -6422,4 +6724,5 @@ if (app) {
          await app.loadModel(defaultName, defaultUrl);
       }
    }
+   app.applySharedStateFromLocation?.();
 }
