@@ -286,7 +286,7 @@ let modelHasTableFacet = false;
 let designSizeOverlayWidthMm = null;
 const GEM_LIBRARY_ORIGIN = 'https://bogdanthegeek.github.io';
 const GEM_LIBRARY_OPEN_MODEL_EVENT = 'gemlibrary:open-model';
-const SHARE_PARAM_NAME = 'share';
+const SHARE_FRAGMENT_KEY = 'share';
 const SHARE_STATE_VERSION = 1;
 const SHARE_UI_KEYS = Object.freeze([
    'ri',
@@ -321,8 +321,8 @@ function applyPresetSpecificGravityToDesignCalculator(presetIndex) {
 }
 let gemLibraryBridgeInstalled = false;
 
-function encodeBase64UrlUtf8(value) {
-   const bytes = new TextEncoder().encode(String(value));
+function encodeBase64UrlBytes(bytesLike) {
+   const bytes = bytesLike instanceof Uint8Array ? bytesLike : new Uint8Array(bytesLike);
    let binary = '';
    const chunkSize = 0x8000;
    for (let i = 0; i < bytes.length; i += chunkSize) {
@@ -332,13 +332,36 @@ function encodeBase64UrlUtf8(value) {
    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
-function decodeBase64UrlUtf8(value) {
+function decodeBase64UrlBytes(value) {
    const padded = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
    const padSize = (4 - (padded.length % 4)) % 4;
    const base64 = padded + '='.repeat(padSize);
    const binary = atob(base64);
-   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-   return new TextDecoder().decode(bytes);
+   return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
+async function gzipStringToBase64Url(value) {
+   if (typeof CompressionStream !== 'function') {
+      throw new Error('CompressionStream is not supported in this browser.');
+   }
+   const bytes = new TextEncoder().encode(String(value));
+   const compressed = new Uint8Array(
+      await new Response(
+         new Blob([bytes]).stream().pipeThrough(new CompressionStream('gzip')),
+      ).arrayBuffer(),
+   );
+   return encodeBase64UrlBytes(compressed);
+}
+
+async function gunzipBase64UrlToString(value) {
+   if (typeof DecompressionStream !== 'function') {
+      throw new Error('DecompressionStream is not supported in this browser.');
+   }
+   const compressed = decodeBase64UrlBytes(value);
+   const decompressed = await new Response(
+      new Blob([compressed]).stream().pipeThrough(new DecompressionStream('gzip')),
+   ).arrayBuffer();
+   return new TextDecoder().decode(decompressed);
 }
 
 function buildShareUiSnapshot(sourceUi) {
@@ -1602,27 +1625,31 @@ async function setupApp() {
    }
 
    function buildSharePayload() {
+      const designDefinition = {
+         gear: parseInt(designGearEl.value, 10),
+         refractiveIndex: ui.ri,
+         facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
+         metadata: getMetadataFromDesign(),
+      };
+      const ascText = buildDesignAscText(designDefinition);
       return {
          version: SHARE_STATE_VERSION,
          ui: buildShareUiSnapshot(ui),
-         design: {
-            gear: parseInt(designGearEl.value, 10),
-            refractiveIndex: ui.ri,
-            facets: designFacets.map((facet, idx) => normalizeDesignFacet(facet, idx)),
-            metadata: getMetadataFromDesign(),
-         },
+         designAsc: ascText,
       };
    }
 
-   function buildShareUrl() {
+   async function buildShareUrl() {
       const payload = buildSharePayload();
-      const encoded = encodeBase64UrlUtf8(JSON.stringify(payload));
+      const encoded = await gzipStringToBase64Url(JSON.stringify(payload));
       const out = new URL(window.location.href);
-      out.searchParams.set(SHARE_PARAM_NAME, encoded);
+      const fragmentParams = new URLSearchParams(out.hash.startsWith('#') ? out.hash.slice(1) : out.hash);
+      fragmentParams.set(SHARE_FRAGMENT_KEY, encoded);
+      out.hash = fragmentParams.toString();
       return out.toString();
    }
 
-   function applySharedPayload(payload) {
+   async function applySharedPayload(payload) {
       if (!payload || typeof payload !== 'object') return false;
       let applied = false;
 
@@ -1631,32 +1658,11 @@ async function setupApp() {
          applied = true;
       }
 
-      const sharedDesign = payload.design;
-      if (sharedDesign && typeof sharedDesign === 'object') {
-         const sharedGear = parseInt(sharedDesign.gear, 10);
-         if (Number.isFinite(sharedGear) && sharedGear > 0) {
-            designGearEl.value = String(sharedGear);
-            applied = true;
-         }
-         if (sharedDesign.metadata && typeof sharedDesign.metadata === 'object') {
-            setMetadataToDesign(sharedDesign.metadata);
-            applied = true;
-         }
-         if (
-            Number.isFinite(Number(sharedDesign.refractiveIndex))
-            && (!payload.ui || !Number.isFinite(Number(payload.ui.ri)))
-         ) {
-            uiControls?.setRI?.(Number(sharedDesign.refractiveIndex));
-            applied = true;
-         }
-         if (Array.isArray(sharedDesign.facets)) {
-            designFacets = sharedDesign.facets.map((facet, idx) => normalizeDesignFacet(facet, idx));
-            renderDesignFacetList();
-            resetDesignHistory();
-            updateDesignStatusSummary();
-            scheduleDesignApply(true);
-            applied = true;
-         }
+      if (typeof payload.designAsc === 'string' && payload.designAsc.length > 0) {
+         const ascData = new TextEncoder().encode(payload.designAsc);
+         const sharedStone = await loadASC(ascData);
+         await applyStoneData('shared.asc', sharedStone, { syncDesignFromStone: true, isDesign: false });
+         applied = true;
       }
 
       if (applied) {
@@ -1665,14 +1671,14 @@ async function setupApp() {
       return applied;
    }
 
-   function applySharedStateFromLocation() {
-      const params = new URLSearchParams(window.location.search || '');
-      const raw = params.get(SHARE_PARAM_NAME);
+   async function applySharedStateFromLocation() {
+      const params = new URLSearchParams((window.location.hash || '').replace(/^#/, ''));
+      const raw = params.get(SHARE_FRAGMENT_KEY);
       if (!raw) return false;
       try {
-         const decodedText = decodeBase64UrlUtf8(raw);
+         const decodedText = await gunzipBase64UrlToString(raw);
          const payload = JSON.parse(decodedText);
-         return applySharedPayload(payload);
+         return await applySharedPayload(payload);
       } catch (err) {
          console.warn('Invalid share payload.', err);
          setDesignStatus('Share link invalid.');
@@ -2866,9 +2872,9 @@ async function setupApp() {
       }
    });
 
-   designShareBtn?.addEventListener('click', () => {
+   designShareBtn?.addEventListener('click', async () => {
       try {
-         const shareUrl = buildShareUrl();
+         const shareUrl = await buildShareUrl();
          openSharePopup(shareUrl);
          setDesignStatus('Share link ready.');
       } catch (err) {
@@ -6724,5 +6730,5 @@ if (app) {
          await app.loadModel(defaultName, defaultUrl);
       }
    }
-   app.applySharedStateFromLocation?.();
+   await app.applySharedStateFromLocation?.();
 }
