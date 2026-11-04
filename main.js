@@ -756,6 +756,7 @@ function buildUI(ui, cbs) {
    const cutsAngleNextBtn = document.getElementById('cutsAngleNextBtn');
    const cutsIndexPrevBtn = document.getElementById('cutsIndexPrevBtn');
    const cutsIndexNextBtn = document.getElementById('cutsIndexNextBtn');
+   const cutsSliderEl = document.getElementById('cutsSlider');
    const setGemTopTab = (tabName) => {
       const isDesign = tabName === 'design';
       const isCuts = tabName === 'cuts';
@@ -779,10 +780,14 @@ function buildUI(ui, cbs) {
       if (!button) return;
       setGemTopTab(button.dataset.gemTab);
    });
-   cutsAnglePrevBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('angle', -1));
-   cutsAngleNextBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('angle', 1));
-   cutsIndexPrevBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('index', -1));
-   cutsIndexNextBtn?.addEventListener('click', () => cbs.onCutsNavigate?.('index', 1));
+   cutsAnglePrevBtn.addEventListener('click', () => cbs.onCutsNavigate?.('angle', -1));
+   cutsAngleNextBtn.addEventListener('click', () => cbs.onCutsNavigate?.('angle', 1));
+   cutsIndexPrevBtn.addEventListener('click', () => cbs.onCutsNavigate?.('index', -1));
+   cutsIndexNextBtn.addEventListener('click', () => cbs.onCutsNavigate?.('index', 1));
+   cutsSliderEl.addEventListener('input', () => {
+      const value = parseFloat(cutsSliderEl.value);
+      cbs.onCutsSliderChanged?.(value);
+   });
    setGemTopTab('controls');
 
    // Mobile toggle
@@ -3394,6 +3399,7 @@ async function setupApp() {
    let cutsSequence = [];
    let cutsAngleIndex = 0;
    let cutsIndexIndex = 0;
+   let cutsSliderValue = 100;
    let cutsActionChain = Promise.resolve();
    let cutsRestoreStone = null;
    let cutsRestoreFilename = '';
@@ -3578,6 +3584,32 @@ async function setupApp() {
       }
    }
 
+   function computeFacetStartCutDepth(existingFacets, selectedFacet, gear) {
+      if (!selectedFacet) return null;
+      const normal = computeFacetNormalFromParams(gear, selectedFacet.startIndex, selectedFacet.angleDeg, selectedFacet.distance);
+      if (!Array.isArray(normal) || normal.length < 3) return null;
+      if (!normal.every((value) => Number.isFinite(value))) return null;
+
+      const preStone = buildStoneFromFacetDesign({
+         gear,
+         refractiveIndex: ui.ri,
+         facets: existingFacets,
+         metadata: {},
+      });
+      if (!(preStone?.vertexData instanceof Float32Array) || preStone.vertexData.length < 3) return null;
+
+      let maxProjection = -Infinity;
+      for (let i = 0; i < preStone.vertexData.length; i += 7) {
+         const x = preStone.vertexData[i + 0];
+         const y = preStone.vertexData[i + 1];
+         const z = preStone.vertexData[i + 2];
+         if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) continue;
+         const projection = x * normal[0] + y * normal[1] + z * normal[2];
+         if (projection > maxProjection) maxProjection = projection;
+      }
+      return Number.isFinite(maxProjection) ? maxProjection : null;
+   }
+
    function buildCutsFacetPreviewSubset() {
       if (!cutsSequence.length) return [];
       const out = [];
@@ -3590,6 +3622,22 @@ async function setupApp() {
          for (let stepIdx = 0; stepIdx < limit; stepIdx++) {
             out.push(group.steps[stepIdx].facet);
          }
+      }
+
+      const selectedFacet = cutsSequence[cutsAngleIndex]?.steps?.[cutsIndexIndex]?.facet;
+      const selectedIndex = out.findIndex((facet) => facet.id === selectedFacet?.id);
+      if (selectedIndex < 0) return out;
+
+      const gear = Math.max(1, parseInt(cutsSourceStone?.sourceGear, 10) || 96);
+      const priorFacets = out.slice(0, selectedIndex);
+      const startDepth = computeFacetStartCutDepth(priorFacets, selectedFacet, gear);
+      const targetDepth = Number(selectedFacet.distance);
+      const depthStart = Number.isFinite(startDepth) ? startDepth : targetDepth;
+      const t = Math.max(0, Math.min(100, Number(cutsSliderValue) || 0)) / 100;
+      const sliderDepth = depthStart + (targetDepth - depthStart) * t;
+
+      if (Number.isFinite(sliderDepth)) {
+         out[selectedIndex] = { ...out[selectedIndex], distance: sliderDepth };
       }
       return out;
    }
@@ -3617,7 +3665,7 @@ async function setupApp() {
          .then(async () => {
             if (!cutsSequence.length) return;
             if (kind === 'angle') moveCutsAngle(direction);
-            else moveCutsIndex(direction);
+            else if (kind === 'index') moveCutsIndex(direction);
             updateCutsReadout();
             await applyCutsPreviewFromCursor();
             requestRender();
@@ -5986,6 +6034,10 @@ async function setupApp() {
 
          updateCutsReadout();
          queueCutsNavigation(kind, 0);
+      },
+      onCutsSliderChanged(value) {
+         cutsSliderValue = value;
+         queueCutsNavigation('depth', value);
       },
       onFileSelected(name, fileUrl) { loadModel(name, fileUrl); },
       async captureRaytracedStoneForPrint() {
