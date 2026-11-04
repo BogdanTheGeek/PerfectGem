@@ -912,7 +912,6 @@ function buildUI(ui, cbs) {
    // --- Clarity slider ---
    claritySlider.addEventListener('input', () => {
       setClarityValue(claritySlider.value);
-      cbs.onGraphParamsChanged?.();
       cbs.onRenderOutputChanged?.();
    });
 
@@ -5054,7 +5053,7 @@ async function setupApp() {
       out[48] = cameraPos[0];
       out[49] = cameraPos[1];
       out[50] = cameraPos[2];
-      out[51] = ui.clarity;
+      out[51] = graphMode > 0.5 ? 1.0 : ui.clarity;
 
       out[52] = time;
       out[53] = ui.ri;
