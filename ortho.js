@@ -233,7 +233,22 @@ function getStoneDimensions(faces, view) {
    };
 }
 
-function renderOrtho(faces, view, canvas, scale = 1.0, gear, summary = {}) {
+function getFacetTierKey(face) {
+   const signedAngleDeg = Number.isFinite(face?.signedAngleDeg)
+      ? Number(face.signedAngleDeg)
+      : 0;
+   const is90Deg = Math.abs(signedAngleDeg) > 89.999;
+   const angleKey = is90Deg
+      ? Math.abs(signedAngleDeg).toFixed(2)
+      : signedAngleDeg.toFixed(2);
+   const name = String(face?.name || '').trim();
+   const dKey = Number.isFinite(face?.d) ? Math.abs(face.d).toFixed(4) : 'NaN';
+   return `${name}\u0000${angleKey}\u0000${dKey}`;
+}
+
+function renderOrtho(faces, view, canvas, scale = 1.0, gear, summary = {}, options = {}) {
+   const tierColorByKey = options?.tierColorByKey instanceof Map ? options.tierColorByKey : null;
+   const enableTierColors = Boolean(options?.enableTierColors && tierColorByKey);
 
    const visible = faces.filter(f => dot3(f.normal, view) > 0.01);
 
@@ -287,7 +302,8 @@ function renderOrtho(faces, view, canvas, scale = 1.0, gear, summary = {}) {
 
    // draw visible faces
    visible.forEach(f => {
-      const fill = `#ffffff`;
+      const tierColor = enableTierColors ? tierColorByKey.get(getFacetTierKey(f)) : null;
+      const fill = tierColor || '#ffffff';
       drawFace(f, edgeCol, fill, 1.5);
    });
 
@@ -391,4 +407,3 @@ function renderOrtho(faces, view, canvas, scale = 1.0, gear, summary = {}) {
 export {
    renderOrtho,
 };
-
