@@ -290,21 +290,35 @@ function buildFacetInfo(stone, summary = null) {
    const groupedSections = groupFacetInfo(facets, summary.gearUsed, stone.preform);
    const sectionOrder = ['PREFORM', 'PAVILION', 'CROWN', 'OTHER'];
    const html = [];
+   const isBootstrapCubePreform = (entries) => {
+      if (!Array.isArray(entries) || entries.length !== 6) return false;
+      const expectedNames = new Set(['PX', 'NX', 'PY', 'NY', 'PZ', 'NZ']);
+      for (const entry of entries) {
+         const tag = String(entry?.instructions || '').trim().toUpperCase();
+         const name = String(entry?.name || '').trim().toUpperCase();
+         if (tag !== 'BOOTSTRAP' || !expectedNames.has(name)) return false;
+         expectedNames.delete(name);
+      }
+      return expectedNames.size === 0;
+   };
 
    for (const sectionName of sectionOrder) {
       const entries = groupedSections.get(sectionName) || [];
       if (!entries.length) continue;
+      if (sectionName === 'PREFORM' && isBootstrapCubePreform(entries)) continue;
 
       html.push(`
             <div class="facetSection">
                <div class="facetSectionTitle">${sectionName}</div>
                ${entries.map((entry) => {
          const instruction = entry.instructions ? escapeHtml(entry.instructions) : '—';
+         const fullRound = entry.indexes.length === summary.gearUsed;
+         const indexesText = fullRound ? 'Round' : formatFacetIndexLines(entry.indexes);
          return `
                      <div class="facetGroup">
                         <div class="facetGroupName">${escapeHtml(entry.name)}</div>
                         <div class="facetGroupAngle">${escapeHtml(entry.angleLabel)}</div>
-                        <div class="facetGroupIndexes">${escapeHtml(formatFacetIndexLines(entry.indexes))}</div>
+                        <div class="facetGroupIndexes">${escapeHtml(indexesText)}</div>
                         <div class="facetGroupInst">${instruction}</div>
                      </div>
                   `;
@@ -985,22 +999,10 @@ function buildStoneFromFacetDesign(definition = {}) {
       const step = gear / symmetry;
       const indexSet = new Set();
 
-      const explicitIndexes = Array.isArray(facet?.indexes)
-         ? [...new Set(
-            facet.indexes
-               .map((value) => parseInt(value, 10))
-               .filter((value) => Number.isFinite(value) && value >= 0)
-               .map((value) => (value === 0 ? gear : value))
-               .map((value) => wrapGearIndex(value, gear)),
-         )]
-         : [];
-
-      if (explicitIndexes.length > 0) {
-         explicitIndexes.forEach((value) => indexSet.add(value));
-      } else {
-         for (let i = 0; i < symmetry; i++) {
-            const offset = i * step;
-            const primary = wrapGearIndex(startIndex + offset, gear);
+      for (let i = 0; i < symmetry; i++) {
+         const offset = i * step;
+         for (const start of facet.startIndexes || [startIndex]) {
+            const primary = wrapGearIndex(start + offset, gear);
             indexSet.add(primary);
             if (mirror) {
                indexSet.add(mirrorIndex(primary, gear));
@@ -1698,57 +1700,69 @@ function wrapGearIndex(value, gear) {
    return value % gear;
 }
 
-function generatePatternIndexSet(startIndex, symmetry, mirror, gear) {
-   const g = gear;
-   const sym = Math.max(1, Math.min(g, Math.round(symmetry) || 1));
-   const step = g / sym;
-   const indexSet = new Set();
-
-   for (let i = 0; i < sym; i++) {
-      const offset = i * step;
-      const primary = wrapGearIndex(startIndex + offset, g);
-      indexSet.add(primary);
-      if (mirror) indexSet.add(mirrorIndex(primary, g));
-   }
-   return [...indexSet].sort((a, b) => a - b);
-}
-
 function inferSymmetryMirrorFromIndexes(indexes, gear) {
    const g = gear;
-   const normalized = [...new Set(
+   const mod = (x) => ((x % g) + g) % g;
+
+   // Normalise to 0..g-1 (gear index g and 0 are the same position)
+   const pts = [...new Set(
       (indexes || [])
-         .map((value) => parseInt(value, 10))
-         .filter((value) => Number.isFinite(value) && value >= 0)
-         .map((value) => (value === 0 ? g : value))
-         .map((value) => wrapGearIndex(value, g)),
+         .map((v) => parseInt(v, 10))
+         .filter((v) => Number.isFinite(v) && v >= 0)
+         .map(mod),
    )].sort((a, b) => a - b);
 
-   if (!normalized.length) return { startIndex: 0, symmetry: 1, mirror: false };
-   if (normalized.length === 1) return { startIndex: normalized[0] === g ? 0 : normalized[0], symmetry: 1, mirror: false };
+   if (!pts.length) return { startIndex: 0, startIndexes: [0], symmetry: 1, mirror: false };
+   if (pts.length === 1) return { startIndex: pts[0], startIndexes: [pts[0]], symmetry: 1, mirror: false };
 
-   // Compute deltas between consecutive indexes (wrap around)
-   const deltas = [];
-   for (let i = 0; i < normalized.length; i++) {
-      const curr = normalized[i];
-      const next = normalized[(i + 1) % normalized.length];
-      const delta = (next - curr + g) % g;
-      if (delta <= 0) {
-         deltas.push(null);
-      } else {
-         deltas.push(delta);
+   const set = new Set(pts);
+   const n = pts.length;
+   const invariantUnder = (fn) => pts.every((p) => set.has(fn(p)));
+
+   // 1. Rotational symmetry: largest k where rotating by g/k maps the set onto itself
+   let k = 1;
+   for (let cand = n; cand >= 2; cand--) {
+      if (g % cand === 0 && n % cand === 0 && invariantUnder((p) => mod(p + g / cand))) {
+         k = cand;
+         break;
+      }
+   }
+   const d = g / k; // sector size
+
+   // 2. Mirror symmetry: some reflection x -> c - x maps the set onto itself.
+   //    Any reflection must send pts[0] to some pts[j], so c = pts[0] + pts[j].
+   let mirrorC = null;
+   for (const q of pts) {
+      const c = mod(pts[0] + q);
+      if (invariantUnder((p) => mod(c - p))) {
+         mirrorC = c;
+         break;
       }
    }
 
-   const allEqual = deltas.every((d) => d !== null && Math.abs(d - deltas[0]) < 1e-6);
+   // 3. Representatives: one start index per orbit
+   const rotationReps = pts.filter((p) => p < d); // rotation only
+   let starts = rotationReps;
+   let mirror = false;
 
-   if (allEqual) {
-      // Even spacing → no mirror, symmetry equals number of positions
-      return { startIndex: normalized[0] === g ? 0 : normalized[0], symmetry: normalized.length, mirror: false };
+   if (mirrorC !== null) {
+      const reps = new Set();
+      for (const p of pts) {
+         let min = Infinity;
+         for (let t = 0; t < k; t++) {
+            min = Math.min(min, mod(p + t * d), mod(mirrorC - p + t * d));
+         }
+         reps.add(min);
+      }
+      // Only report mirror if it actually reduces the number of starts
+      // (e.g. a regular polygon is trivially mirror-symmetric, but 1 start + symmetry is simpler)
+      if (reps.size < rotationReps.length) {
+         starts = [...reps].sort((a, b) => a - b);
+         mirror = true;
+      }
    }
 
-   // Otherwise assume mirrored pattern: mirror doubles the unique positions
-   const inferredSymmetry = Math.max(1, Math.min(g, Math.floor(normalized.length / 2)));
-   return { startIndex: normalized[0] === g ? 0 : normalized[0], symmetry: inferredSymmetry, mirror: true };
+   return { startIndex: starts[0], startIndexes: starts, symmetry: k, mirror };
 }
 
 function computeSignedFacetAngleDeg(normal) {
@@ -1827,6 +1841,7 @@ function groupExternalFacetsForDesign(facets = [], gear) {
             mirror: inferred.mirror,
             angleDeg: downFacingFlat ? -0 : signedAngle,
             startIndex: inferred.startIndex,
+            startIndexes: inferred.startIndexes,
             distance,
             indexes: indexes.length ? [...new Set(indexes)] : undefined,
          });
@@ -1931,6 +1946,7 @@ function normalizeDesignFacet(inputFacet = {}, fallbackIndex = 0) {
       mirror: Boolean(inputFacet.mirror),
       angleDeg,
       startIndex: Math.max(0, Math.min(360, Math.round(Number.isFinite(parsedStartIndex) ? parsedStartIndex : 0))),
+      startIndexes: inputFacet.startIndexes,
       distance: normalizedDistance,
       indexes: parsedIndexes && parsedIndexes.length ? parsedIndexes : undefined,
       previewDisabled: Boolean(inputFacet.previewDisabled),
@@ -1955,16 +1971,12 @@ function generateFacesFromFacetList(facetList = [], gear = 96) {
       const step = Math.max(1, gear) / symmetry;
       const mirror = Boolean(facet.mirror);
 
-      const explicit = Array.isArray(facet.indexes) ? facet.indexes.map(v => wrapGearIndex(Math.round(v), gear)) : [];
-
       const indexSet = new Set();
-      if (explicit.length) {
-         for (const idx of explicit) indexSet.add(idx);
-      } else {
-         const start = wrapGearIndex(facet.startIndex, gear);
+      for (const start of facet.startIndexes || [facet.startIndex]) {
+         const startIndex = wrapGearIndex(start, gear);
          for (let i = 0; i < symmetry; i++) {
             const off = Math.round(i * step);
-            const primary = wrapGearIndex(start + off, gear);
+            const primary = wrapGearIndex(startIndex + off, gear);
             indexSet.add(primary);
             if (mirror) indexSet.add(mirrorIndex(primary, gear));
          }
@@ -2591,7 +2603,6 @@ export {
    groupFacetInfo,
    formatFacetIndexLines,
    parseFacetGearIndex,
-   generatePatternIndexSet,
    inferSymmetryMirrorFromIndexes,
    computeSignedFacetAngleDeg,
    getFacetDistanceValue,

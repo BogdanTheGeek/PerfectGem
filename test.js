@@ -129,7 +129,7 @@ async function test() {
             throw new Error(`No existing JSON to compare for ${file}`);
          }
          const existingInfo = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-         if (diff(existingInfo, info)) {
+         if (diff(existingInfo, info) || diff(info, existingInfo)) {
             failures.push('baseline mismatch vs results JSON');
          }
 
@@ -151,15 +151,25 @@ async function test() {
       throw new Error('No supported model file found for roundtrip serializer test.');
    }
 
+   // roundtrip test: load from model file, serialize to each format, load back, and compare
    const roundtripSourceStone = await loadStoneFromModelFile(roundtripSourceFile);
    const roundtripSourceInfo = dumpStoneInfo(roundtripSourceStone);
    const roundtripDefinition = buildDesignDefinitionFromStone(roundtripSourceStone);
    for (const format of ['gcs', 'asc', 'gem']) {
       const roundtripStone = await loadStoneFromSerializedDefinition(format, roundtripDefinition);
       const roundtripInfo = dumpStoneInfo(roundtripStone);
-      if (diff(roundtripSourceInfo, roundtripInfo, `${roundtripSourceFile}.${format}`)) {
+      if (diff(roundtripSourceInfo, roundtripInfo, `${roundtripSourceFile}.${format}`) ||
+         diff(roundtripInfo, roundtripSourceInfo, `${roundtripSourceFile}.${format}`)) {
          throw new Error(`Roundtrip mismatch for ${roundtripSourceFile} (${format})`);
       }
+   }
+
+   // rescale to unit sphere should maintain indexes and angles, but d values will change
+   const rescaledStone = await loadStoneFromSerializedDefinition('gem', buildDesignDefinitionFromStone(roundtripSourceStone));
+   const rescaledInfo = dumpStoneInfo(rescaledStone);
+   if (diff(roundtripSourceInfo, rescaledInfo, `${roundtripSourceFile}.rescaled`) ||
+      diff(rescaledInfo, roundtripSourceInfo, `${roundtripSourceFile}.rescaled`)) {
+      throw new Error(`Rescale mismatch for ${roundtripSourceFile}`);
    }
 
    console.log('Test results:');

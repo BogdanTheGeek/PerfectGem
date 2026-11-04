@@ -2015,7 +2015,7 @@ async function setupApp() {
             <td class="cellNum"><input data-field="symmetry" type="number" min="1" max="96" step="1" value="${facet.symmetry}"></td>
             <td class="cellMirror"><label class="check"><input data-field="mirror" type="checkbox" ${facet.mirror ? 'checked' : ''}></label></td>
             <td class="cellNum"><input data-field="angleDeg" type="number" min="-90" max="90" step="0.001" value="${facet.angleDeg.toFixed(4)}"></td>
-            <td class="cellNum"><input data-field="startIndex" type="number" min="0" max="360" step="1" value="${facet.startIndex}"></td>
+            <td class="cellNum"><input data-field="startIndex" type="text" value="${facet.startIndexes.join(",")}"></td>
             <td class="cellNum"><input data-field="distance" type="number" min="-5" max="5" step="0.00001" value="${facet.distance.toFixed(5)}"></td>
             <td class="cellInst"><input data-field="instructions" type="text" value="${escapeHtml(facet.instructions || '')}"></td>
             <td class="cellRemove"><button class="designFacetRemove" type="button" data-remove="1">X</button></td>
@@ -2056,13 +2056,18 @@ async function setupApp() {
    }
 
    function readCreateFacetFromInputs() {
+      function parseDesignStartIndexes(value) {
+         if (typeof value !== 'string') return [];
+         return value.split(',').map((v) => parseInt(v.trim(), 10)).filter((v) => Number.isFinite(v) && v >= 0);
+      }
+
       return normalizeDesignFacet({
          name: designNameEl.value,
          instructions: designInstructionsEl.value,
          symmetry: parseInt(designSymmetryEl.value, 10),
          mirror: designMirrorEl.checked,
          angleDeg: parseFloat(designAngleEl.value),
-         startIndex: parseInt(designStartIndexEl.value, 10),
+         startIndexes: parseDesignStartIndexes(designStartIndexEl.value),
          distance: parseFloat(designDistanceEl.value),
       }, designFacets.length);
    }
@@ -2128,20 +2133,8 @@ async function setupApp() {
          const mirror = Boolean(normalized.mirror);
          const step = g / symmetry;
          const indexSet = new Set();
-         const explicitIndexes = Array.isArray(normalized.indexes)
-            ? [...new Set(
-               normalized.indexes
-                  .map((value) => parseInt(value, 10))
-                  .filter((value) => Number.isFinite(value) && value >= 0)
-                  .map((value) => (value === 0 ? g : value))
-                  .map((value) => wrapDesignGearIndex(value, g)),
-            )]
-            : [];
-
-         if (explicitIndexes.length > 0) {
-            explicitIndexes.forEach((value) => indexSet.add(value));
-         } else {
-            const startIndex = wrapDesignGearIndex(normalized.startIndex, g);
+         for (const start of normalized.startIndexes) {
+            const startIndex = wrapDesignGearIndex(start, g);
             for (let i = 0; i < symmetry; i++) {
                const offset = i * step;
                const primary = wrapDesignGearIndex(startIndex + offset, g);
@@ -2215,6 +2208,7 @@ async function setupApp() {
 
 
       const grouped = groupExternalFacetsForDesign(facets, gear);
+      console.log('Grouped facets for design', { grouped, sourceGear, gear });
       const symmetryValues = grouped
          .map((facet) => parseInt(facet?.symmetry, 10))
          .filter((value) => Number.isFinite(value) && value >= 1);
@@ -2238,6 +2232,7 @@ async function setupApp() {
                   bestSymmetry = value;
                }
             }
+            console.log('Best symmetry for design facets', { bestSymmetry, counts });
             designSymmetryEl.value = String(Math.max(1, Math.min(gear, bestSymmetry)));
          } else {
             designSymmetryEl.value = '1';
@@ -2245,6 +2240,7 @@ async function setupApp() {
       }
 
       designFacets = grouped.map((facet, idx) => normalizeDesignFacet(facet, idx));
+      console.log('Set design facets from stone', { facets, designFacets, sourceGear, gear });
       renderDesignFacetList();
       if (resetHistory) resetDesignHistory();
    }
@@ -2969,6 +2965,11 @@ async function setupApp() {
       if (field === 'mirror') nextFacet[field] = Boolean(e.target.checked);
       else if (field === 'previewDisabled') nextFacet.previewDisabled = Boolean(e.target.checked);
       else if (field === 'name' || field === 'instructions') nextFacet[field] = e.target.value;
+      else if (field === 'startIndex'){
+         const startIndexes = e.target.value.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
+         nextFacet.startIndex = startIndexes.length > 0 ? startIndexes[0] : 0;
+         nextFacet.startIndexes = startIndexes;
+      }
       else nextFacet[field] = parseFloat(e.target.value);
       if (field === 'symmetry' || field === 'mirror' || field === 'startIndex') {
          nextFacet.indexes = undefined;
@@ -4113,20 +4114,8 @@ async function setupApp() {
       const step = gear / symmetry;
       const indexSet = new Set();
 
-      const explicitIndexes = Array.isArray(normalized.indexes)
-         ? [...new Set(
-            normalized.indexes
-               .map((value) => parseInt(value, 10))
-               .filter((value) => Number.isFinite(value) && value >= 0)
-               .map((value) => (value === 0 ? gear : value))
-               .map((value) => wrapDesignGearIndex(value, gear)),
-         )]
-         : [];
-
-      if (explicitIndexes.length > 0) {
-         for (const idx of explicitIndexes) indexSet.add(idx);
-      } else {
-         const start = wrapDesignGearIndex(normalized.startIndex, gear);
+      for (const startIndex of normalized.startIndexes) {
+         const start = wrapDesignGearIndex(startIndex, gear);
          for (let i = 0; i < symmetry; i++) {
             const off = Math.round(i * step);
             const primary = wrapDesignGearIndex(start + off, gear);

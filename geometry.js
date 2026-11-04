@@ -223,6 +223,9 @@ export function stretchStoneByVertices(stone, scaleFactor, crown = true, options
       if (!result || !(result.vertexData instanceof Float32Array) || result.triangleCount === 0) {
          return stone;
       }
+      if (stone && typeof stone === 'object') {
+         result.metadata = { ...(stone.metadata || {}) };
+      }
       return result;
    } catch {
       return stone;
