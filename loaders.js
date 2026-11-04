@@ -8,6 +8,11 @@ import {
    stretchStoneByVertices as geometryStretchStoneByVertices,
 } from './geometry.js';
 
+import {
+   rgbToHex,
+   hslToRgb
+} from './utils.js';
+
 let XMLParser = null;
 
 if (typeof window === 'undefined') {
@@ -262,9 +267,35 @@ async function loadGCS(data) {
    return new StoneData(vertexData, triCount, facets, refractiveIndex, dispersion, sourceGear, metadata);
 }
 
+// First 9: Okabe-Ito (designed for colour blindness) plus two Tol colours,
+// ordered so consecutive entries contrast strongly.
+const BASE_COLORS = [
+   "#E69F00", // orange
+   "#56B4E9", // sky blue
+   "#009E73", // bluish green
+   "#D55E00", // vermillion
+   "#0072B2", // blue
+   "#F0E442", // yellow
+   "#CC79A7", // reddish purple
+   "#332288", // indigo
+   "#882255", // wine
+];
+
+const GOLDEN_ANGLE = 137.508;
+// Lightness/saturation cycles so colours with similar hues still differ.
+const LIGHTNESS = [48, 66, 34, 57];
+const SATURATION = [75, 90, 60];
+
 function getTierColor(index) {
-   const hue = (index * 47) % 360;
-   return `hsl(${hue} 78% 45%)`;
+   if (index < BASE_COLORS.length) return BASE_COLORS[index];
+
+   const n = index - BASE_COLORS.length;
+   const hue = (n * GOLDEN_ANGLE + 20) % 360;
+   const sat = SATURATION[n % SATURATION.length];
+   const lit = LIGHTNESS[n % LIGHTNESS.length];
+   const rgb = hslToRgb([hue / 360, sat / 100, lit / 100]);
+   const hex = rgbToHex(rgb);
+   return hex;
 }
 
 function buildFacetInfo(stone, summary = null, options = {}) {

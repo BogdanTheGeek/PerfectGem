@@ -29,6 +29,12 @@ import {
 } from './geometry.js';
 import { exportInProgress, setupExporter } from './video.js';
 import { renderOrtho } from './ortho.js';
+import {
+   rgbToHex,
+   rgbToHsl,
+   hslToRgb,
+   hexToRgb,
+} from './utils.js';
 
 const shaderSource = await (await fetch('shaders.wgsl')).text();
 const computeShaderSource = await (await fetch('compute.wgsl')).text();
@@ -495,20 +501,6 @@ function buildGraphSvgMarkup(seriesList, width, height, printTheme = false) {
    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${buildGraphSvgInner(seriesList, W, H, theme)}</svg>`;
 }
 
-function hexToRgb(hex) {
-   const r = parseInt(hex.slice(1, 3), 16) / 255;
-   const g = parseInt(hex.slice(3, 5), 16) / 255;
-   const b = parseInt(hex.slice(5, 7), 16) / 255;
-   return [r, g, b];
-}
-
-function rgbToHex(rgb) {
-   const r = Math.max(0, Math.min(255, Math.round((rgb?.[0] ?? 0) * 255)));
-   const g = Math.max(0, Math.min(255, Math.round((rgb?.[1] ?? 0) * 255)));
-   const b = Math.max(0, Math.min(255, Math.round((rgb?.[2] ?? 0) * 255)));
-   return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-}
-
 function escapeHtml(text) {
    return String(text)
       .replaceAll('&', '&amp;')
@@ -668,11 +660,6 @@ function setMetadataToDesign(metadata) {
    if (metadata.comments !== undefined) designFooterEl.value = metadata.comments;
    else designFooterEl.value = '';
 }
-
-function isBootstrapFacet(facet) {
-   return String(facet?.instructions || '').trim().toUpperCase() === 'BOOTSTRAP';
-}
-
 
 // ---------------------------------------------------------------------------
 // UI panel — markup and CSS live in index.html; this function wires up
@@ -1088,6 +1075,14 @@ function buildUI(ui, cbs) {
          tierColorByKey,
          useTierColors: true,
       });
+      for (const [key, color] of tierColorByKey.entries()) {
+         console.log('tierColorByKey', key, color);
+         const rgb = hexToRgb(color);
+         let hsl = rgbToHsl(rgb);
+         hsl[2] = 0.5 + 0.5 * hsl[2]; // reduce saturation by 50%
+         const newCol = rgbToHex(hslToRgb(hsl));
+         tierColorByKey.set(key, newCol);
+      }
       const size = 500;
       for (const [name, view] of Object.entries(views)) {
          const tmp = document.createElement('canvas');
@@ -1172,7 +1167,7 @@ body { font-family: Arial; margin: 20px; }
 .facetGroup + .facetGroup { border-top: 1px solid; }
 body.tierColorsOn .facetGroup[data-tier-color] {
    border-left-color: var(--tier-color);
-   background: color-mix(in srgb, var(--tier-color) 14%, white);
+   background: color-mix(in srgb, var(--tier-color) 25%, white);
 }
 .facetGroupName,
 .facetGroupAngle { font-size: 12px; font-weight: 600; }
@@ -3023,7 +3018,7 @@ async function setupApp() {
       if (field === 'mirror') nextFacet[field] = Boolean(e.target.checked);
       else if (field === 'previewDisabled') nextFacet.previewDisabled = Boolean(e.target.checked);
       else if (field === 'name' || field === 'instructions') nextFacet[field] = e.target.value;
-      else if (field === 'startIndex'){
+      else if (field === 'startIndex') {
          const startIndexes = e.target.value.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => Number.isFinite(n));
          nextFacet.startIndex = startIndexes.length > 0 ? startIndexes[0] : 0;
          nextFacet.startIndexes = startIndexes;
