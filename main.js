@@ -1238,6 +1238,7 @@ body.tierColorsOn .facetGroup[data-tier-color] {
 }
 @media print {
     .pb { page-break-before: always; }
+    .printTools { display: none; }
 }
   </style>
 </head>
@@ -3076,15 +3077,24 @@ async function setupApp() {
       }
 
       const distanceInputEl = itemEl.querySelector('[data-field="distance"]');
-      if (!distanceInputEl) return;
-      const distanceCellEl = distanceInputEl.closest('td');
+      const angleInputEl = itemEl.querySelector('[data-field="angleDeg"]');
+      if (!distanceInputEl && !angleInputEl) return;
+      const distanceCellEl = distanceInputEl ? distanceInputEl.closest('td') : null;
+      const angleCellEl = angleInputEl ? angleInputEl.closest('td') : null;
       const clickedDistanceControl = e.target.closest('[data-field="distance"]');
+      const clickedAngleControl = e.target.closest('[data-field="angleDeg"]');
       const clickedCellEl = e.target.closest('td');
       const isDistanceInteraction = clickedDistanceControl
          || (distanceCellEl && clickedCellEl && clickedCellEl === distanceCellEl);
-      if (!isDistanceInteraction) return;
+      const isAngleInteraction = clickedAngleControl
+         || (angleCellEl && clickedCellEl && clickedCellEl === angleCellEl);
 
-      if (applyFacetDistanceFromSelectedVertex(itemEl.dataset.id)) {
+      if (isAngleInteraction && applyFacetAngleAndDistanceFromTwoSelectedVertices(itemEl.dataset.id)) {
+         requestRender();
+         return;
+      }
+
+      if (isDistanceInteraction && applyFacetDistanceFromSelectedVertex(itemEl.dataset.id)) {
          requestRender();
       }
    });
@@ -4237,6 +4247,16 @@ async function setupApp() {
       return selectedVertexId;
    }
 
+   function getTwoSelectedVertexIds() {
+      if (!Array.isArray(designSelection.vertexIds) || designSelection.vertexIds.length !== 2) return null;
+      if (Array.isArray(designSelection.edgeIds) && designSelection.edgeIds.length > 0) return null;
+      const v0 = Number(designSelection.vertexIds[0]);
+      const v1 = Number(designSelection.vertexIds[1]);
+      if (!Number.isInteger(v0) || v0 < 0 || !Number.isInteger(v1) || v1 < 0) return null;
+      if (v0 === v1) return null;
+      return [v0, v1];
+   }
+
    function captureSingleSelectedVertexPosition() {
       const selectedVertexId = getSingleSelectedVertexId();
       if (selectedVertexId == null) return null;
@@ -4371,6 +4391,104 @@ async function setupApp() {
       return true;
    }
 
+   function buildFacetWithAngleAndDistanceFromTwoVertices(facetInput, facetIdx, vertexA, vertexB) {
+      if (!Array.isArray(vertexA) || vertexA.length < 3) return null;
+      if (!Array.isArray(vertexB) || vertexB.length < 3) return null;
+
+      const facet = normalizeDesignFacet(facetInput, facetIdx);
+      const gear = Math.max(1, parseInt(designGearEl.value, 10) || 96);
+      const candidateIndexes = buildFacetIndexSetForRow(facet, gear);
+      const startIndex = wrapDesignGearIndex(Number(facet.startIndex) || 0, gear);
+      const delta = sub3(vertexB, vertexA);
+      const preferredSign = Number(facet.angleDeg) < 0 ? -1 : 1;
+
+      const circularDistance = (a, b) => {
+         const da = Math.abs(wrapDesignGearIndex(a, gear) - wrapDesignGearIndex(b, gear));
+         return Math.min(da, gear - da);
+      };
+
+      let best = null;
+      for (const idx of candidateIndexes) {
+         const azi = ((idx % gear) / gear) * Math.PI * 2;
+         const a = (delta[0] * Math.sin(azi)) - (delta[1] * Math.cos(azi));
+         const b = delta[2];
+         if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+
+         let sign = preferredSign;
+         let angleAbsDeg = 0;
+         if (Math.abs(a) <= 1e-10 && Math.abs(b) <= 1e-10) {
+            angleAbsDeg = Math.min(90, Math.max(0, Math.abs(Number(facet.angleDeg) || 0)));
+         } else if (Math.abs(b) <= 1e-10) {
+            angleAbsDeg = 0;
+         } else if (Math.abs(a) <= 1e-10) {
+            angleAbsDeg = 90;
+         } else {
+            sign = (a * b) > 0 ? -1 : 1;
+            angleAbsDeg = Math.atan2(Math.abs(b), Math.abs(a)) * 180 / Math.PI;
+         }
+
+         const angleDeg = Math.max(-90, Math.min(90, sign * angleAbsDeg));
+         const normal = computeFacetNormalFromParams(gear, idx, angleDeg, facet.distance);
+         const d0 = dot3(normal, vertexA);
+         const d1 = dot3(normal, vertexB);
+         if (!Number.isFinite(d0) || !Number.isFinite(d1)) continue;
+
+         const residual = Math.abs(d0 - d1);
+         const distance = 0.5 * (d0 + d1);
+         const startIndexDistance = circularDistance(idx, startIndex);
+         const signPenalty = sign === preferredSign ? 0 : 1;
+         if (!best
+            || residual < best.residual - 1e-8
+            || (Math.abs(residual - best.residual) <= 1e-8 && signPenalty < best.signPenalty)
+            || (Math.abs(residual - best.residual) <= 1e-8
+               && signPenalty === best.signPenalty
+               && startIndexDistance < best.startIndexDistance)) {
+            best = { idx, angleDeg, distance, residual, signPenalty, startIndexDistance };
+         }
+      }
+      if (!best) return null;
+
+      const nextFacet = normalizeDesignFacet(
+         {
+            ...facet,
+            angleDeg: best.angleDeg,
+            distance: best.distance,
+            indexDistances: undefined,
+         },
+         facetIdx,
+      );
+      return {
+         facet: nextFacet,
+         best,
+      };
+   }
+
+   function applyFacetAngleAndDistanceFromTwoSelectedVertices(facetId) {
+      if (!facetId) return false;
+      const selectedVertexIds = getTwoSelectedVertexIds();
+      if (!selectedVertexIds) return false;
+
+      buildDesignPickCacheIfNeeded();
+      const vertexA = designPickCache.vertices[selectedVertexIds[0]]?.p;
+      const vertexB = designPickCache.vertices[selectedVertexIds[1]]?.p;
+      if (!vertexA || !vertexB) return false;
+
+      const facetIdx = designFacets.findIndex((facet) => facet.id === facetId);
+      if (facetIdx < 0) return false;
+
+      const solved = buildFacetWithAngleAndDistanceFromTwoVertices(designFacets[facetIdx], facetIdx, vertexA, vertexB);
+      if (!solved) return false;
+
+      const historyBefore = snapshotDesignFacets();
+      designFacets[facetIdx] = solved.facet;
+
+      renderDesignFacetList();
+      scheduleDesignApply();
+      commitDesignHistory(historyBefore);
+      setDesignStatus(`Set ${solved.facet.name || `F${facetIdx + 1}`} angle/dist to meet 2 selected vertices on index ${solved.best.idx}`);
+      return true;
+   }
+
    function computeDesignIndexFromNormal(normal, gear, fallbackIndex = 0) {
       const x = Number(normal?.[0]) || 0;
       const y = Number(normal?.[1]) || 0;
@@ -4499,7 +4617,7 @@ async function setupApp() {
 
       const stoneWidth = computeStoneWidthForSelection();
 
-      if (designSelection.edgeIds.length === 1) {
+      if (designSelection.edgeIds.length === 1 && designSelection.vertexIds.length === 0) {
          const edge = designPickCache.edges[designSelection.edgeIds[0]];
          const edgeMetric = edgeLengthAndPercent(edge, stoneWidth);
          if (!edgeMetric) return result;
@@ -4570,24 +4688,25 @@ async function setupApp() {
             else if (zDelta < -zEps) desiredSign = -1;
          }
 
-         const solvedAngleDeg = Math.abs(currentAngle) * desiredSign;
-         const centerXY = computeStoneCenterXYForSelection();
-         const inferredIndex = centerXY
-            ? inferIndexFromTwoVertices(v0, v1, centerXY, gear, currentIndex)
-            : currentIndex;
-         designAngleEl.value = Math.max(-90, Math.min(90, solvedAngleDeg)).toFixed(3);
-         designStartIndexEl.value = String(inferredIndex);
+         const inputFacet = readCreateFacetFromInputs();
+         const lockedIndexFacet = normalizeDesignFacet({
+            ...inputFacet,
+            startIndex: currentIndex,
+            startIndexes: [currentIndex],
+            symmetry: 1,
+            mirror: false,
+            angleDeg: Math.abs(currentAngle) * desiredSign,
+         }, designFacets.length);
+         const solved = buildFacetWithAngleAndDistanceFromTwoVertices(lockedIndexFacet, designFacets.length, v0, v1);
+         const solvedAngleDeg = (solved?.facet && Number.isFinite(Number(solved.facet.angleDeg)))
+            ? Number(solved.facet.angleDeg)
+            : Math.abs(currentAngle) * desiredSign;
+         const fallbackNormal = computeFacetNormalFromParams(gear, currentIndex, solvedAngleDeg, inputFacet.distance);
+         const planeDist = (solved?.facet && Number.isFinite(Number(solved.facet.distance)))
+            ? Math.abs(Number(solved.facet.distance))
+            : Math.abs(0.5 * (dot3(fallbackNormal, v0) + dot3(fallbackNormal, v1)));
 
-         const angleAbsRad = Math.abs(solvedAngleDeg) * Math.PI / 180;
-         const azi = ((inferredIndex % gear) / gear) * Math.PI * 2;
-         let c = Math.cos(angleAbsRad);
-         let s = Math.sin(angleAbsRad);
-         if (solvedAngleDeg < 0) {
-            c *= -1;
-            s *= -1;
-         }
-         const solvedNormal = normalize3([s * Math.sin(azi), -s * Math.cos(azi), c]);
-         const planeDist = Math.abs(0.5 * (dot3(solvedNormal, v0) + dot3(solvedNormal, v1)));
+         designAngleEl.value = Math.max(-90, Math.min(90, solvedAngleDeg)).toFixed(3);
          designDistanceEl.value = Math.max(0, planeDist).toFixed(5);
 
          const edgeLength = len3(sub3(v1, v0));
@@ -4597,9 +4716,9 @@ async function setupApp() {
 
          result.title = '2 Vertices';
          if (Number.isFinite(edgeMm)) {
-            result.details = `Span ${edgeMm.toFixed(3)} mm, index ${inferredIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
+            result.details = `Span ${edgeMm.toFixed(3)} mm, index ${currentIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
          } else {
-            result.details = `Span ${edgeLength.toFixed(5)} (mm n/a), index ${inferredIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
+            result.details = `Span ${edgeLength.toFixed(5)} (mm n/a), index ${currentIndex}, dist ${planeDist.toFixed(5)} (autofill)`;
          }
          return result;
       }
